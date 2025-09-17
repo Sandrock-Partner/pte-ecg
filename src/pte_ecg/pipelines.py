@@ -19,6 +19,7 @@ from .features import (
     get_morphological_features,
     get_nonlinear_features,
     get_statistical_features,
+    get_waveshape_features,
     get_welch_features,
 )
 from .preprocessing import PreprocessingSettings, preprocess
@@ -113,6 +114,9 @@ def get_features(
         sfreq = int(sfreq)
 
     feature_list = []
+
+    if settings.features.waveshape.enabled:
+        feature_list.append(get_waveshape_features(ecg, sfreq))
 
     if settings.features.fft.enabled:
         feature_list.append(get_fft_features(ecg, sfreq))
