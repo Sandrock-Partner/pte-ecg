@@ -12,11 +12,13 @@ from .features import (
     MorphologicalArgs,
     NonlinearArgs,
     StatisticalArgs,
+    WaveShapeArgs,
     WelchArgs,
     get_fft_features,
     get_morphological_features,
     get_nonlinear_features,
     get_statistical_features,
+    get_waveshape_features,
     get_welch_features,
 )
 from .pipelines import Settings, get_features
@@ -29,7 +31,7 @@ from .preprocessing import (
     preprocess,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "__version__",
     "logger",
@@ -39,6 +41,7 @@ __all__ = [
     "get_morphological_features",
     "get_nonlinear_features",
     "get_statistical_features",
+    "get_waveshape_features",
     "get_welch_features",
     "get_features",
     "preprocess",
@@ -54,6 +57,7 @@ __all__ = [
     "StatisticalArgs",
     "MorphologicalArgs",
     "NonlinearArgs",
+    "WaveShapeArgs",
 ]
 
 

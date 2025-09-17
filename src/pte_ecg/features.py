@@ -13,17 +13,18 @@ import warnings
 from typing import Literal
 
 import neurokit2 as nk
-
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=UserWarning, module="nolds")
-    import nolds
 import numpy as np
 import pandas as pd
+import pybispectra
 import pydantic
 import scipy.fft
 import scipy.signal
 import scipy.stats
 from pydantic import Field
+
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=UserWarning, module="nolds")
+    import nolds
 
 from ._logging import logger
 
@@ -109,6 +110,16 @@ class NonlinearArgs(BaseFeature):
     n_jobs: int = -1
 
 
+class WaveShapeArgs(BaseFeature):
+    """Settings for wave shape feature extraction.
+
+    Attributes:
+        enabled: Whether to compute wave shape features.
+    """
+
+    enabled: bool = False
+
+
 class FeatureSettings(pydantic.BaseModel):
     """Container for all feature extraction settings.
 
@@ -118,6 +129,7 @@ class FeatureSettings(pydantic.BaseModel):
         statistical: Settings for statistical feature extraction.
         morphological: Settings for morphological feature extraction.
         nonlinear: Settings for nonlinear feature extraction.
+        waveshape: Settings for wave shape feature extraction.
     """
 
     fft: FFTArgs = Field(default_factory=FFTArgs)
@@ -125,6 +137,7 @@ class FeatureSettings(pydantic.BaseModel):
     statistical: StatisticalArgs = Field(default_factory=StatisticalArgs)
     morphological: MorphologicalArgs = Field(default_factory=MorphologicalArgs)
     nonlinear: NonlinearArgs = Field(default_factory=NonlinearArgs)
+    waveshape: WaveShapeArgs = Field(default_factory=WaveShapeArgs)
 
 
 class ECGDelineationError(Exception):
@@ -144,6 +157,60 @@ def assert_3_dims(ecg_data: np.ndarray) -> None:
     """
     if ecg_data.ndim != 3:
         raise ValueError("ECG data must be 3D (n_samples, n_channels, n_timepoints)")
+
+
+def get_waveshape_features(
+    ecg_data: np.ndarray, sfreq: float, n_jobs: int = -1
+) -> pd.DataFrame:
+    pybispectra.set_precision("single")
+    if isinstance(sfreq, float):
+        sfreq = int(sfreq)
+    processes = _get_n_processes(n_jobs, ecg_data.shape[0])
+    fft_coeffs_all, freqs = pybispectra.compute_fft(
+        data=ecg_data,
+        sampling_freq=sfreq,
+        n_points=int(sfreq // 3),
+        window="hanning",
+        n_jobs=processes,
+        verbose=False,
+    )
+    results_all = []
+    for i, fft_coeffs in enumerate(fft_coeffs_all[:2]):
+        fft_coeffs = fft_coeffs[:][np.newaxis, :]  #
+        waveshape = pybispectra.WaveShape(
+            data=fft_coeffs,
+            freqs=freqs,
+            sampling_freq=sfreq,
+            verbose=False,
+        )
+        waveshape.compute(f1s=(1, 40), f2s=(1, 40))  # )  # compute waveshape
+        results = waveshape.results.get_results(copy=False)
+
+        results_all = []
+        # transform results from (channels, f1s, f2s) to (channels*f1s*f2s)
+        results = results.reshape(
+            results.shape[0] * results.shape[1] * results.shape[2], -1
+        )
+        # [np.abs, np.real, np.imag, np.angle]
+        results_all.append(results)
+
+        print(
+            f"Waveshape results: [{results.shape[0]} channels x "
+            f"{results.shape[1]} f1s x {results.shape[2]} f2s]"
+        )
+        figs, axes = waveshape.results.plot(
+            major_tick_intervals=10,
+            minor_tick_intervals=2,
+            # cbar_range_abs=(0, 1),
+            # cbar_range_real=(-1, 1),
+            # cbar_range_imag=(-1, 1),
+            # cbar_range_phase=(0, 2),
+            plot_absolute=False,
+            show=False,
+        )
+        figs[0].show()
+    ...
+    return pd.DataFrame(results_all)
 
 
 def get_fft_features(ecg_data: np.ndarray, sfreq: float) -> pd.DataFrame:
@@ -404,7 +471,7 @@ def _stat_single_patient(sample_data: np.ndarray, sfreq: float) -> dict[str, flo
         "autocorr",
     ]
     column_names = [
-        f"stat_{name}_ch{ch}"
+        f"statistical_{name}_ch{ch}"
         for ch in range(sample_data.shape[0])
         for name in base_names
     ]
@@ -670,7 +737,7 @@ def _morph_single_patient(
             continue
         ch_feat = _morph_single_channel(ch_data, sfreq)
         features.update(
-            (f"morph_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
+            (f"morphological_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
         )
     return features
 
