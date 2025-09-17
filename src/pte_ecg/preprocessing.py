@@ -196,7 +196,7 @@ def preprocess(
     return ecg, sfreq_new
 
 
-def _check_flats(ecg: np.ndarray, drop_flats_recs: bool) -> np.ndarray:
+def _check_flats(ecg: np.ndarray, drop_flat_recs: bool) -> np.ndarray:
     are_flat_chs = np.all(np.isclose(ecg, ecg[..., 0:1]), axis=-1)
     n_flats = np.sum(are_flat_chs)
     if n_flats == ecg.shape[0] * ecg.shape[1]:
@@ -210,7 +210,7 @@ def _check_flats(ecg: np.ndarray, drop_flats_recs: bool) -> np.ndarray:
     are_empty_recordings = np.all(are_flat_chs, axis=-1)
     n_empty_recordings = np.sum(are_empty_recordings)
     empty_recordings = np.where(are_empty_recordings)[0]
-    if n_empty_recordings > 0 and drop_flats_recs:
+    if n_empty_recordings > 0 and drop_flat_recs:
         logger.warning(
             f"Discarding {n_empty_recordings} recordings with flat lines in all channels."
             f" Recording indices: {empty_recordings}."
