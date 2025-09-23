@@ -13,11 +13,11 @@ configurable preprocessing pipeline.
 import warnings
 from typing import Literal
 
-import mne
-import mne.baseline
 import numpy as np
 import pydantic
 from pydantic import Field
+from scipy import signal
+from scipy.signal import resample
 
 from ._logging import logger
 
@@ -151,47 +151,103 @@ def preprocess(
         f"and {n_timepoints} timepoints at {sfreq} Hz"
     )
     sfreq_new = sfreq
-    if preprocessing.resample.enabled and sfreq_new is not None:
+    if preprocessing.resample.enabled and preprocessing.resample.sfreq_new is not None:
         sfreq_new = preprocessing.resample.sfreq_new
         logger.info(f"Resampling from {sfreq} Hz to {sfreq_new} Hz")
-        ecg = mne.filter.resample(
-            ecg,
-            up=1.0,
-            down=sfreq / sfreq_new,
-            axis=-1,
-            n_jobs=1,
-            verbose="WARNING",
-        )
-        n_timepoints = ecg.shape[-1]
+        # Calculate new number of samples
+        new_n_timepoints = int(n_timepoints * sfreq_new / sfreq)
+        # Resample each sample and channel
+        ecg_resampled = np.zeros((n_samples, n_channels, new_n_timepoints))
+        for i in range(n_samples):
+            for j in range(n_channels):
+                ecg_resampled[i, j, :] = resample(ecg[i, j, :], new_n_timepoints)
+        ecg = ecg_resampled
+        n_timepoints = new_n_timepoints
 
     if preprocessing.bandpass.enabled:
-        ecg = mne.filter.filter_data(
-            ecg,
-            sfreq_new,
-            l_freq=preprocessing.bandpass.l_freq,
-            h_freq=preprocessing.bandpass.h_freq,
-            n_jobs=1,
-            copy=True,
-            verbose="WARNING",
-        )
-    if preprocessing.notch.enabled:
-        ecg = mne.filter.notch_filter(
-            ecg,
-            sfreq_new,
-            freqs=preprocessing.notch.freq,
-            n_jobs=1,
-            copy=True,
-            verbose="WARNING",
-        )
+        # Apply bandpass filter using scipy
+        l_freq = preprocessing.bandpass.l_freq
+        h_freq = preprocessing.bandpass.h_freq
+
+        if l_freq is not None or h_freq is not None:
+            nyquist = sfreq_new / 2
+
+            # Design filter
+            if l_freq is not None and h_freq is not None:
+                # Bandpass filter
+                low = l_freq / nyquist
+                high = h_freq / nyquist
+                b, a = signal.butter(4, [low, high], btype="band")
+            elif l_freq is not None:
+                # High-pass filter
+                low = l_freq / nyquist
+                b, a = signal.butter(4, low, btype="high")
+            else:
+                # Low-pass filter
+                high = h_freq / nyquist
+                b, a = signal.butter(4, high, btype="low")
+
+            # Apply filter to each sample and channel
+            for i in range(n_samples):
+                for j in range(n_channels):
+                    ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
+    if preprocessing.notch.enabled and preprocessing.notch.freq is not None:
+        # Apply notch filter using scipy
+        freq = preprocessing.notch.freq
+        nyquist = sfreq_new / 2
+
+        # Design notch filter (band-stop filter)
+        # Use a narrow band around the target frequency
+        low = (freq - 1) / nyquist
+        high = (freq + 1) / nyquist
+        b, a = signal.butter(4, [low, high], btype="bandstop")
+
+        # Apply filter to each sample and channel
+        for i in range(n_samples):
+            for j in range(n_channels):
+                ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
     ecg = ecg.reshape(n_samples, -1)
     if preprocessing.normalize.enabled:
-        ecg = mne.baseline.rescale(
-            ecg,
-            times=np.arange(ecg.shape[-1]),
-            baseline=(None, None),
-            mode=preprocessing.normalize.mode,
-            verbose="WARNING",
-        )
+        # Apply normalization using custom implementation
+        mode = preprocessing.normalize.mode
+
+        if mode == "mean":
+            # Subtract mean of each channel
+            ecg = ecg - np.mean(ecg, axis=-1, keepdims=True)
+        elif mode == "ratio":
+            # Divide by mean of each channel
+            mean_vals = np.mean(ecg, axis=-1, keepdims=True)
+            mean_vals = np.where(mean_vals == 0, 1, mean_vals)  # Avoid division by zero
+            ecg = ecg / mean_vals
+        elif mode == "logratio":
+            # Log of ratio
+            mean_vals = np.mean(ecg, axis=-1, keepdims=True)
+            mean_vals = np.where(
+                mean_vals <= 0, 1e-10, mean_vals
+            )  # Avoid log of zero/negative
+            ecg = np.log(ecg / mean_vals)
+        elif mode == "percent":
+            # Scale to percentage of mean
+            mean_vals = np.mean(ecg, axis=-1, keepdims=True)
+            mean_vals = np.where(mean_vals == 0, 1, mean_vals)  # Avoid division by zero
+            ecg = (ecg / mean_vals) * 100
+        elif mode == "zscore":
+            # Standard score (z-score) normalization
+            mean_vals = np.mean(ecg, axis=-1, keepdims=True)
+            std_vals = np.std(ecg, axis=-1, keepdims=True)
+            std_vals = np.where(std_vals == 0, 1, std_vals)  # Avoid division by zero
+            ecg = (ecg - mean_vals) / std_vals
+        elif mode == "zlogratio":
+            # Z-score of log ratio
+            mean_vals = np.mean(ecg, axis=-1, keepdims=True)
+            mean_vals = np.where(
+                mean_vals <= 0, 1e-10, mean_vals
+            )  # Avoid log of zero/negative
+            log_ratio = np.log(ecg / mean_vals)
+            mean_log = np.mean(log_ratio, axis=-1, keepdims=True)
+            std_log = np.std(log_ratio, axis=-1, keepdims=True)
+            std_log = np.where(std_log == 0, 1, std_log)  # Avoid division by zero
+            ecg = (log_ratio - mean_log) / std_log
     ecg = ecg.reshape(n_samples, n_channels, n_timepoints)
     return ecg, sfreq_new
 

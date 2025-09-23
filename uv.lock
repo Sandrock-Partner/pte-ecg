@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -884,13 +884,10 @@ wheels = [
 name = "pte-ecg"
 source = { editable = "." }
 dependencies = [
-    { name = "mne" },
     { name = "neurokit2" },
-    { name = "nolds" },
     { name = "numba" },
     { name = "numpy" },
     { name = "pandas" },
-    { name = "pybispectra" },
     { name = "pydantic" },
     { name = "pywavelets" },
     { name = "scipy" },
@@ -898,6 +895,13 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+all = [
+    { name = "nolds" },
+    { name = "pybispectra" },
+]
+bispectrum = [
+    { name = "pybispectra" },
+]
 dev = [
     { name = "mypy" },
     { name = "pre-commit" },
@@ -906,6 +910,9 @@ dev = [
 lint = [
     { name = "ruff" },
 ]
+nonlinear = [
+    { name = "nolds" },
+]
 test = [
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -913,13 +920,10 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mne", specifier = ">=1.9.0" },
     { name = "neurokit2", specifier = ">=0.2.11" },
-    { name = "nolds", specifier = ">=0.6.2" },
     { name = "numba", specifier = ">=0.61.2" },
     { name = "numpy", specifier = ">=2.0.0" },
     { name = "pandas", specifier = ">=2.3.0" },
-    { name = "pybispectra", specifier = ">=1.2.1" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pywavelets", specifier = ">=1.8.0" },
     { name = "scipy", specifier = ">=1.15.3" },
@@ -927,12 +931,18 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+all = [
+    { name = "nolds", specifier = ">=0.6.2" },
+    { name = "pybispectra", specifier = ">=1.2.1" },
+]
+bispectrum = [{ name = "pybispectra", specifier = ">=1.2.1" }]
 dev = [
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "tox" },
 ]
 lint = [{ name = "ruff" }]
+nonlinear = [{ name = "nolds", specifier = ">=0.6.2" }]
 test = [
     { name = "pytest", specifier = ">=6.0" },
     { name = "pytest-cov", specifier = ">=4.2.0" },

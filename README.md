@@ -40,10 +40,25 @@ This package aims at providing an extensible and pluggable interface to extract 
 
 ## 🚀 Installation
 
-### Using pip
+### Basic Installation
 
 ```bash
 pip install git+https://github.com/richardkoehler/pte-ecg.git
+```
+
+### Optional Dependencies
+
+The package supports optional feature groups that can be installed as needed:
+
+```bash
+# For nonlinear features (requires nolds)
+pip install git+https://github.com/richardkoehler/pte-ecg.git[nonlinear]
+
+# For bispectrum features (requires pybispectra)
+pip install git+https://github.com/richardkoehler/pte-ecg.git[bispectrum]
+
+# Install all optional dependencies
+pip install git+https://github.com/richardkoehler/pte-ecg.git[all]
 ```
 
 ### Using uv

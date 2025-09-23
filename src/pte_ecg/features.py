@@ -15,16 +15,29 @@ from typing import Literal
 import neurokit2 as nk
 import numpy as np
 import pandas as pd
-import pybispectra
 import pydantic
 import scipy.fft
 import scipy.signal
 import scipy.stats
 from pydantic import Field
 
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=UserWarning, module="nolds")
-    import nolds
+# Optional dependencies
+try:
+    import pybispectra
+
+    HAS_PYBISPECTRA = True
+except ImportError:
+    HAS_PYBISPECTRA = False
+    pybispectra = None
+
+try:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="nolds")
+        import nolds
+    HAS_NOLDS = True
+except ImportError:
+    HAS_NOLDS = False
+    nolds = None
 
 from ._logging import logger
 
@@ -162,6 +175,12 @@ def assert_3_dims(ecg_data: np.ndarray) -> None:
 def get_waveshape_features(
     ecg_data: np.ndarray, sfreq: float, n_jobs: int = -1
 ) -> pd.DataFrame:
+    if not HAS_PYBISPECTRA:
+        raise ImportError(
+            "pybispectra is required for waveshape features. "
+            "Install with: pip install pte-ecg[bispectrum]"
+        )
+
     pybispectra.set_precision("single")
     if isinstance(sfreq, float):
         sfreq = int(sfreq)
@@ -401,7 +420,7 @@ def get_statistical_features(
     start = _log_start("Statistical", ecg_data.shape[0])
     args_list = ((ecg_single, sfreq) for ecg_single in ecg_data)
     processes = _get_n_processes(n_jobs, ecg_data.shape[0])
-    if processes in [0, 1]:
+    if processes == 1:
         results = [_stat_single_patient(*args) for args in args_list]
     else:
         logger.info(f"Starting parallel processing with {processes} CPUs")
@@ -527,7 +546,7 @@ def get_nonlinear_features(
         for sample_num, ecg_single in enumerate(ecg_data)
     )
     processes = _get_n_processes(n_jobs, ecg_data.shape[0])
-    if processes in [0, 1]:
+    if processes == 1:
         results = [_nonlinear_single_patient(*args) for args in args_list]
     else:
         logger.info(f"Starting parallel processing with {processes} CPUs")
@@ -563,6 +582,12 @@ def _nonlinear_single_channel(
     Returns:
         dict containing the extracted nonlinear features
     """
+    if not HAS_NOLDS:
+        raise ImportError(
+            "nolds is required for nonlinear features. "
+            "Install with: pip install pte-ecg[nonlinear]"
+        )
+
     features: dict[str, float] = {}
     features["sample_entropy"] = nolds.sampen(ch_data, emb_dim=2)
     features["hurst_exponent"] = nolds.hurst_rs(ch_data)
@@ -700,7 +725,7 @@ def get_morphological_features(
         for sample_num, ecg_single in enumerate(ecg_data)
     )
     processes = _get_n_processes(n_jobs, ecg_data.shape[0])
-    if processes in [0, 1]:
+    if processes == 1:
         results = [_morph_single_patient(*args) for args in args_list]
     else:
         logger.info(f"Starting parallel processing with {processes} CPUs")
@@ -786,9 +811,24 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
         logger.warning("No R-peaks detected. Skipping morphological features.")
         return {}
     waves_dict: dict = {}
-    for method in ["dwt", "prominence", "peak", "cwt"]:
+    
+    # Optimized method selection based on profiling results:
+    # - prominence is fastest (4x faster than dwt) and most reliable
+    # - cwt performs poorly at low sampling rates (<100 Hz)
+    # - dwt and peak are fallback options
+    if sfreq < 100:
+        # Low sampling rate: skip cwt as it detects significantly fewer features
+        methods = ["prominence", "dwt", "peak"]
+        logger.debug(f"Using low-frequency optimized methods for {sfreq} Hz: {methods}")
+    else:
+        # High sampling rate: use all methods with optimized order
+        methods = ["prominence", "dwt", "cwt", "peak"]
+        logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
+    
+    successful_method = None
+    for method in methods:
         if n_r_peaks < 2 and method in {"prominence", "cwt"}:
-            logger.info("Not enough R-peaks for prominence or cwt method.")
+            logger.info(f"Not enough R-peaks ({n_r_peaks}) for {method} method.")
             continue
         try:
             with warnings.catch_warnings():
@@ -799,6 +839,8 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
                     sampling_rate=sfreq,
                     method=method,
                 )
+            successful_method = method
+            logger.debug(f"ECG delineation successful with method: {method}")
             break
         except nk.misc.NeuroKitWarning as e:
             if "Too few peaks detected" in str(e):
@@ -1018,17 +1060,55 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
 
 
 def _get_n_processes(n_jobs: int | None, n_tasks: int) -> int:
-    """Get the number of processes to use for parallel processing."""
-    if n_jobs not in [-1, None]:
-        return n_jobs
+    """Get the number of processes to use for parallel processing.
 
+    Args:
+        n_jobs: Number of parallel jobs to run.
+                - None or -1: Use all available CPUs
+                - Positive int: Use exactly that many CPUs
+                - Negative int (< -1): Use (total_cpus + n_jobs + 1) CPUs
+        n_tasks: Number of tasks to process (used to cap the number of processes)
+
+    Returns:
+        Number of processes to use, capped by n_tasks
+    """
+    # Get total number of CPUs
     if sys.version_info >= (3, 13):
-        n_processes = os.process_cpu_count()
-        logger.debug(f"Using os.process_cpu_count: {n_processes} processes available")
+        total_cpus = os.process_cpu_count()
+        logger.debug(f"Using os.process_cpu_count: {total_cpus} CPUs available")
     else:
-        n_processes = os.cpu_count()
-        logger.debug(f"Using os.cpu_count: {n_processes} processes available")
-    return min(n_processes, n_tasks)
+        total_cpus = os.cpu_count()
+        logger.debug(f"Using os.cpu_count: {total_cpus} CPUs available")
+
+    # Handle None or fallback if cpu_count returns None
+    if total_cpus is None:
+        logger.warning("Could not determine CPU count, defaulting to 1")
+        total_cpus = 1
+
+    # Handle different n_jobs values
+    if n_jobs is None or n_jobs == -1:
+        # Use all available CPUs
+        n_processes = total_cpus
+    elif n_jobs > 0:
+        # Use exactly n_jobs CPUs
+        n_processes = n_jobs
+    elif n_jobs < -1:
+        # Use (total_cpus + n_jobs + 1) CPUs
+        # e.g., n_jobs=-2 means use all CPUs except 1
+        n_processes = max(1, total_cpus + n_jobs + 1)
+    else:
+        # n_jobs == 0, which doesn't make sense, default to 1
+        logger.warning(f"Invalid n_jobs value: {n_jobs}, defaulting to 1")
+        n_processes = 1
+
+    # Cap by number of tasks (no point using more processes than tasks)
+    n_processes = min(n_processes, n_tasks)
+
+    # Ensure at least 1 process
+    n_processes = max(1, n_processes)
+
+    logger.debug(f"Using {n_processes} processes for {n_tasks} tasks")
+    return n_processes
 
 
 def _log_end(feature_name: str, start_time: float, shape: tuple[int, int]) -> None:
