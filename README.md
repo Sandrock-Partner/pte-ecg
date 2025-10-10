@@ -2,7 +2,7 @@
 
 # PTE-ECG
 
-![License](https://img.shields.io/github/license/richardkoehler/pte-ecg)
+![License](https://img.shields.io/github/license/Sandrock-Partner/pte-ecg)
 <!-- ![PyPI version](https://img.shields.io/pypi/v/pte-ecg?color=blue) -->
 <!-- ![Build Status](https://img.shields.io/github/actions/workflow/status/richardkoehler/pte-ecg/python-package.yml?branch=main) -->
 
