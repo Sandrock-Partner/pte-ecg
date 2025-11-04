@@ -6,42 +6,87 @@ format that includes the logger name, log level, and message.
 """
 
 import logging
-import pathlib
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Literal
 
-logger = logging.getLogger(__package__)
-logger.setLevel(logging.INFO)
-logger.propagate = False
 _formatter = logging.Formatter("%(name)s | %(levelname)s | %(message)s")
-_console_handler = logging.StreamHandler(sys.stdout)
-_console_handler.setLevel(logging.INFO)
-_console_handler.setFormatter(_formatter)
-logger.addHandler(_console_handler)
 
 
-def set_log_level(level: int) -> None:
-    """Set the logging level for the package logger.
+def _configure_default_logging() -> logging.Logger:
+    """Configure default logging for the root logger.
+
+    This sets up basic console logging with INFO level and proper formatting.
+    Called automatically when this module is imported.
+    """
+    logger = logging.getLogger("cad_dataset_pipeline")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    _console_handler = logging.StreamHandler(sys.stdout)
+    _console_handler.setLevel(logging.WARNING)
+    _console_handler.setFormatter(_formatter)
+    logger.addHandler(_console_handler)
+    return logger
+
+
+logger = _configure_default_logging()
+
+
+def set_log_level(
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+) -> None:
+    """Configure logging level.
 
     Args:
-        level: The logging level to set (e.g., logging.INFO, logging.DEBUG).
+        log_level: Log level for console output (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+
+    Example:
+        >>> from pathlib import Path
+        >>> logger = set_log_level(log_level="WARNING")
+        >>> logger.info("This won't show (below WARNING)")
+        >>> logger.warning("This will show on console and in file")
     """
+    numeric_level: int = int(getattr(logging, log_level))
     old_level = logger.level
-    if level != old_level:
-        logger.setLevel(level)
+    if old_level == numeric_level:
+        return
+    logger.setLevel(numeric_level)
 
 
-def set_log_file(fname: str | pathlib.Path, overwrite: bool = False) -> None:
-    """Add a file handler to the package logger.
+def set_log_file(
+    log_file: Path,
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG",
+) -> None:
+    """Configure logging for the root logger (all modules inherit from it).
+
+    This function configures the root logger non-destructively, preserving existing
+    file handlers while updating console handlers. This ensures that when subprocesses
+    call set_log_level(), they don't remove the main scheduler's file handler.
 
     Args:
-        fname: Path to the log file.
-        overwrite: If True, overwrite the log file if it exists. If False, append to it.
+        log_file: Path to log file.
+        log_level: Log level for console output (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+
+    Returns:
+        The root logger instance
+
+    Example:
+        >>> from pathlib import Path
+        >>> logger = set_log_file(
+        ...     log_level="WARNING",
+        ...     log_file=Path("logs/pipeline.log"),
+        ... )
     """
-    if isinstance(fname, str):
-        fname = pathlib.Path(fname)
-    mode = "w"
-    if fname.exists() and not overwrite:
-        mode = "a"
-    file_handler = logging.FileHandler(fname, mode=mode)
+    numeric_level: int = int(getattr(logging, log_level))
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    for h in list(logger.handlers):
+        if isinstance(h, logging.FileHandler):
+            h.close()
+            logger.removeHandler(h)
+
+    file_handler = RotatingFileHandler(log_file, maxBytes=100_000_000, backupCount=3)
+    file_handler.setLevel(numeric_level)
     file_handler.setFormatter(_formatter)
     logger.addHandler(file_handler)
