@@ -15,27 +15,28 @@ _formatter = logging.Formatter("%(name)s | %(levelname)s | %(message)s")
 
 
 def _configure_default_logging() -> logging.Logger:
-    """Configure default logging for the root logger.
+    """Configure default logging.
 
     This sets up basic console logging with INFO level and proper formatting.
     Called automatically when this module is imported.
     """
-    logger = logging.getLogger("cad_dataset_pipeline")
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-    _console_handler = logging.StreamHandler(sys.stdout)
-    _console_handler.setLevel(logging.WARNING)
-    _console_handler.setFormatter(_formatter)
-    logger.addHandler(_console_handler)
+    logger = logging.getLogger(__package__)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(_formatter)
+        console_handler.setLevel(logging.INFO)
+        logger.addHandler(console_handler)
+
     return logger
 
 
 logger = _configure_default_logging()
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
-def set_log_level(
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-) -> None:
+def set_log_level(log_level: LogLevel) -> None:
     """Configure logging level.
 
     Args:
@@ -52,12 +53,11 @@ def set_log_level(
     if old_level == numeric_level:
         return
     logger.setLevel(numeric_level)
+    for handler in logger.handlers:
+        handler.setLevel(numeric_level)
 
 
-def set_log_file(
-    log_file: Path,
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG",
-) -> None:
+def set_log_file(log_file: Path, log_level: LogLevel = "DEBUG") -> None:
     """Configure logging for the root logger (all modules inherit from it).
 
     This function configures the root logger non-destructively, preserving existing
