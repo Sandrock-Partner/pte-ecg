@@ -9,7 +9,6 @@ maintainers = [
 requires-python = ">=3.11"
 dependencies = [
     "neurokit2>=0.2.11",
-    "numba>=0.61.2",
     "numpy>=2.0.0",
     "pandas>=2.3.0",
     "pydantic>=2.11.7",
@@ -39,8 +38,8 @@ dev = ["mypy", "pre-commit", "tox"]
 lint = ["ruff"]
 test = ["pytest>=6.0", "pytest-cov>=4.2.0"]
 nonlinear = ["nolds>=0.6.2"]
-bispectrum = ["pybispectra>=1.2.1"]
-all = ["nolds>=0.6.2", "pybispectra>=1.2.1"]
+bispectrum = ["pybispectra>=1.2.1", "numba>=0.61.2"]
+all = ["nolds>=0.6.2", "pybispectra>=1.2.1", "numba>=0.61.2"]
 
 [build-system]
 requires = ["hatchling"]
