@@ -21,7 +21,6 @@ import scipy.signal
 import scipy.stats
 from pydantic import Field
 
-# Optional dependencies
 try:
     import pybispectra
 
@@ -764,6 +763,125 @@ def _morph_single_patient(
         features.update(
             (f"morphological_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
         )
+
+    # Calculate electrical axes (requires combining data from multiple channels)
+    # Assumes standard 12-lead ECG ordering: I, II, III, aVR, aVL, aVF, V1-V6
+    # Lead I = ch0, aVF = ch5
+    # QRS axis from R-wave amplitudes
+    r_amp_lead_i = features.get("morphological_r_amplitude_ch0")
+    r_amp_lead_avf = features.get("morphological_r_amplitude_ch5")
+    if (
+        r_amp_lead_i is not None
+        and r_amp_lead_avf is not None
+        and (r_amp_lead_i != 0 or r_amp_lead_avf != 0)
+    ):
+        features["morphological_qrs_axis"] = float(
+            np.arctan2(r_amp_lead_avf, r_amp_lead_i) * 180 / np.pi
+        )
+
+    # P axis from P-wave amplitudes
+    p_amp_lead_i = features.get("morphological_p_amplitude_ch0")
+    p_amp_lead_avf = features.get("morphological_p_amplitude_ch5")
+    if (
+        p_amp_lead_i is not None
+        and p_amp_lead_avf is not None
+        and (p_amp_lead_i != 0 or p_amp_lead_avf != 0)
+    ):
+        features["morphological_p_axis"] = float(
+            np.arctan2(p_amp_lead_avf, p_amp_lead_i) * 180 / np.pi
+        )
+
+    # Territory-Specific Markers (requires 12-lead ECG)
+    # Standard 12-lead ordering: I, II, III, aVR, aVL, aVF, V1-V6
+    if sample_data.shape[0] >= 12:
+        # ANTERIOR WALL (LAD Territory - V1-V4)
+        v1_v3_leads = [6, 7, 8]
+        v1_v4_leads = [6, 7, 8, 9]
+        v1_v3_st_elev = np.mean(
+            [
+                features.get(f"morphological_st_elevation_ch{ch}", 0.0)
+                for ch in v1_v3_leads
+            ]
+        )
+        features["morphological_V1_V3_ST_elevation"] = float(v1_v3_st_elev)
+
+        v1_v4_t_inv = np.mean(
+            [
+                features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0)
+                for ch in v1_v4_leads
+            ]
+        )
+        features["morphological_V1_V4_T_inversion"] = float(v1_v4_t_inv)
+
+        q_v1 = abs(features.get("morphological_q_amplitude_ch6", 0.0))
+        r_v1 = features.get("morphological_r_amplitude_ch6", 1.0)
+        features["morphological_V1_Q_amplitude"] = float(q_v1)
+        features["morphological_V1_Q_to_R_ratio"] = (
+            float(q_v1 / r_v1) if r_v1 > 0 else 0.0
+        )
+
+        # INFERIOR WALL (RCA Territory - II, III, aVF)
+        inferior_leads = [1, 2, 5]
+        inf_st_elev = np.mean(
+            [
+                features.get(f"morphological_st_elevation_ch{ch}", 0.0)
+                for ch in inferior_leads
+            ]
+        )
+        features["morphological_II_III_aVF_ST_elevation"] = float(inf_st_elev)
+
+        inf_t_inv = np.mean(
+            [
+                features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0)
+                for ch in inferior_leads
+            ]
+        )
+        features["morphological_II_III_aVF_T_inversion"] = float(inf_t_inv)
+
+        q_iii = abs(features.get("morphological_q_amplitude_ch2", 0.0))
+        r_iii = features.get("morphological_r_amplitude_ch2", 1.0)
+        features["morphological_III_Q_amplitude"] = float(q_iii)
+        features["morphological_III_Q_to_R_ratio"] = (
+            float(q_iii / r_iii) if r_iii > 0 else 0.0
+        )
+
+        # LATERAL WALL (LCX Territory - I, aVL, V5, V6)
+        lateral_leads = [0, 4, 10, 11]
+        lat_st_elev = np.mean(
+            [
+                features.get(f"morphological_st_elevation_ch{ch}", 0.0)
+                for ch in lateral_leads
+            ]
+        )
+        features["morphological_I_aVL_V5_V6_ST_elevation"] = float(lat_st_elev)
+
+        lat_t_inv = np.mean(
+            [
+                features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0)
+                for ch in lateral_leads
+            ]
+        )
+        features["morphological_I_aVL_V5_V6_T_inversion"] = float(lat_t_inv)
+
+        q_v5 = abs(features.get("morphological_q_amplitude_ch10", 0.0))
+        r_v5 = features.get("morphological_r_amplitude_ch10", 1.0)
+        q_v6 = abs(features.get("morphological_q_amplitude_ch11", 0.0))
+        r_v6 = features.get("morphological_r_amplitude_ch11", 1.0)
+
+        features["morphological_V5_Q_amplitude"] = float(q_v5)
+        features["morphological_V5_Q_to_R_ratio"] = (
+            float(q_v5 / r_v5) if r_v5 > 0 else 0.0
+        )
+        features["morphological_V6_Q_amplitude"] = float(q_v6)
+        features["morphological_V6_Q_to_R_ratio"] = (
+            float(q_v6 / r_v6) if r_v6 > 0 else 0.0
+        )
+
+        # GLOBAL PATTERNS (aVR)
+        features["morphological_aVR_ST_elevation"] = float(
+            features.get("morphological_st_elevation_ch3", 0.0)
+        )
+
     return features
 
 
@@ -811,7 +929,7 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
         logger.warning("No R-peaks detected. Skipping morphological features.")
         return {}
     waves_dict: dict = {}
-    
+
     # Optimized method selection based on profiling results:
     # - prominence is fastest (4x faster than dwt) and most reliable
     # - cwt performs poorly at low sampling rates (<100 Hz)
@@ -823,9 +941,10 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
     else:
         # High sampling rate: use all methods with optimized order
         methods = ["prominence", "dwt", "cwt", "peak"]
-        logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
-    
-    successful_method = None
+        logger.debug(
+            f"Using high-frequency optimized methods for {sfreq} Hz: {methods}"
+        )
+
     for method in methods:
         if n_r_peaks < 2 and method in {"prominence", "cwt"}:
             logger.info(f"Not enough R-peaks ({n_r_peaks}) for {method} method.")
@@ -839,7 +958,6 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
                     sampling_rate=sfreq,
                     method=method,
                 )
-            successful_method = method
             logger.debug(f"ECG delineation successful with method: {method}")
             break
         except nk.misc.NeuroKitWarning as e:
@@ -1051,10 +1169,135 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
         if s_amplitudes:
             features["s_amplitude"] = np.mean(s_amplitudes)
 
+    # QRS Fragmentation (count notches/direction changes in QRS complex)
+    features["qrs_fragmentation"] = 0.0
+    if n_q_peaks and n_s_peaks:
+        fragmentations = []
+        for q_idx, s_idx in zip(q_peaks, s_peaks):
+            if np.isnan(q_idx) or np.isnan(s_idx):
+                continue
+            q_pos = int(q_idx)
+            s_pos = int(s_idx)
+            if s_pos <= q_pos:
+                continue
+            qrs_region = ch_data[q_pos : s_pos + 1]
+            if len(qrs_region) < 3:
+                continue
+            diff = np.diff(qrs_region)
+            sign_changes = np.diff(np.sign(diff))
+            notch_count = int(np.sum(np.abs(sign_changes) > 0.1))
+            fragmentations.append(notch_count)
+        if fragmentations:
+            features["qrs_fragmentation"] = float(np.mean(fragmentations))
+
     if n_t_peaks:
         t_amplitudes = [ch_data[t] for t in t_peaks if not np.isnan(t)]
         if t_amplitudes:
             features["t_amplitude"] = np.mean(t_amplitudes)
+
+            # T-wave inversion depth (for negative T-waves)
+            t_inversion_depths = [abs(amp) for amp in t_amplitudes if amp < 0]
+            if t_inversion_depths:
+                features["t_wave_inversion_depth"] = float(np.mean(t_inversion_depths))
+            else:
+                features["t_wave_inversion_depth"] = 0.0
+
+    # T-wave symmetry (ratio of ascending to descending limb duration)
+    features["t_symmetry"] = 1.0
+    t_onsets = waves_dict.get("ECG_T_Onsets")
+    t_offsets = waves_dict.get("ECG_T_Offsets")
+    if t_onsets is not None and t_offsets is not None and n_t_peaks:
+        symmetry_ratios = []
+        for onset, peak, offset in zip(t_onsets, t_peaks, t_offsets):
+            if np.isnan(onset) or np.isnan(peak) or np.isnan(offset):
+                continue
+            ascending_duration = peak - onset
+            descending_duration = offset - peak
+            if ascending_duration <= 0 or descending_duration <= 0:
+                continue
+            ratio = ascending_duration / descending_duration
+            ratio = max(0.1, min(2.0, ratio))
+            symmetry_ratios.append(ratio)
+        if symmetry_ratios:
+            features["t_symmetry"] = float(np.mean(symmetry_ratios))
+
+    # ST Segment Features
+    # Calculate global baseline (isoelectric line) from first 200ms of signal
+    baseline_samples = int(0.2 * sfreq)  # 200ms
+    global_baseline = np.mean(ch_data[: min(baseline_samples, len(ch_data))])
+
+    if n_s_peaks and n_r_peaks:
+        st_elevations = []
+        st_depressions = []
+        st_slopes = []
+
+        # Process each S-peak to extract ST segment features
+        for s_peak in s_peaks:
+            if np.isnan(s_peak):
+                continue
+
+            s_idx = int(s_peak)
+
+            # ST segment: J-point (S-peak) + 20ms to J-point + 80ms
+            st_start = s_idx + int(0.02 * sfreq)  # J+20ms
+            st_end = min(len(ch_data), s_idx + int(0.08 * sfreq))  # J+80ms
+
+            if st_end > st_start and st_start < len(ch_data):
+                st_segment = ch_data[st_start:st_end]
+
+                # ST level relative to baseline
+                st_level = np.mean(st_segment) - global_baseline
+
+                # ST elevation (positive deviation)
+                st_elevations.append(max(0, st_level))
+
+                # ST depression (negative deviation)
+                st_depressions.append(max(0, -st_level))
+
+                # ST slope (trend across ST segment)
+                if len(st_segment) > 1:
+                    slope = (st_segment[-1] - st_segment[0]) / len(st_segment)
+                    st_slopes.append(slope)
+
+        # Store averaged ST segment features
+        if st_elevations:
+            features["st_elevation"] = float(np.mean(st_elevations))
+        if st_depressions:
+            features["st_depression"] = float(np.mean(st_depressions))
+        if st_elevations and st_depressions:
+            features["j_point_elevation"] = features.get(
+                "st_elevation", 0.0
+            ) - features.get("st_depression", 0.0)
+        if st_slopes:
+            features["st_slope"] = float(np.mean(st_slopes))
+
+    # QTc (Corrected QT interval using Bazett's formula)
+    # QTc = QT / √(RR) where QT is in ms and RR is in seconds
+    if "qt_interval" in features and "rr_interval_mean" in features:
+        qt_ms = features["qt_interval"]
+        rr_sec = features["rr_interval_mean"]
+        if rr_sec > 0:
+            features["qtc_interval"] = qt_ms / np.sqrt(rr_sec)
+        else:
+            features["qtc_interval"] = qt_ms  # Fallback if RR is invalid
+
+    # Interval Ratios
+    # Convert RR interval from seconds to milliseconds for ratio calculations
+    rr_ms = features.get("rr_interval_mean", 0.0) * 1000
+
+    # QT/RR ratio
+    if "qt_interval" in features and rr_ms > 0:
+        features["qt_rr_ratio"] = features["qt_interval"] / rr_ms
+
+    # PR/RR ratio (using pq_interval as PR interval)
+    if "pq_interval" in features and rr_ms > 0:
+        features["pr_rr_ratio"] = features["pq_interval"] / rr_ms
+
+    # T/QT ratio
+    if "t_duration" in features and "qt_interval" in features:
+        qt_ms = features["qt_interval"]
+        if qt_ms > 0:
+            features["t_qt_ratio"] = features["t_duration"] / qt_ms
 
     return features
 

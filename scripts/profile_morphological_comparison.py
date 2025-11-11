@@ -6,11 +6,7 @@ This script profiles the _morph_single_patient function at different sampling fr
 to identify how sampling rate affects performance and accuracy.
 """
 
-import cProfile
-import pstats
 import time
-from io import StringIO
-from pathlib import Path
 from typing import Any
 
 import numpy as np

@@ -218,7 +218,7 @@ def detailed_timing_profile(sample_data: np.ndarray, sfreq: float) -> dict[str, 
 def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 10.0) -> dict:
     """Profile morphological feature extraction at a specific sampling frequency."""
     print(f"\n=== Profiling at {sfreq} Hz ===")
-    print(f"Loading real ECG data from NeuroKit2...")
+    print("Loading real ECG data from NeuroKit2...")
     
     sample_data = load_real_ecg_data(n_channels, duration, sfreq)
     print(f"Loaded ECG data: {sample_data.shape} (channels x samples)")
