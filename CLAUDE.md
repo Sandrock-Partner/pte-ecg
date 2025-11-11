@@ -74,6 +74,101 @@ ECG Data (numpy array: n_channels × n_samples)
 pandas DataFrame (n_samples × n_features)
 ```
 
+### Plugin-Based Feature Extraction Architecture
+
+**As of version 0.4.0** (in development), PTE-ECG uses a plugin-based architecture for feature extractors:
+
+#### Architecture Components
+
+**ExtractorRegistry** (`feature_extractors/registry.py`)
+- Singleton registry for feature extractor plugins
+- Auto-discovers extractors via entry points in `pyproject.toml`
+- Provides `list_extractors()` and `get_extractor()` methods
+
+**FeatureExtractorProtocol** (`feature_extractors/base.py`)
+- Protocol (interface) defining the extractor contract
+- All extractors must implement: `name`, `available_features`, `get_features()`
+
+**BaseFeatureExtractor** (`feature_extractors/base.py`)
+- Base class providing common functionality
+- Handles feature selection via `_should_extract_feature()`
+- Implements n_jobs configuration for parallel processing
+
+#### Available Extractors
+
+1. **FFTExtractor** (`feature_extractors/fft.py`)
+   - 21 features per channel
+   - Frequency domain analysis using FFT
+   - Fully vectorized implementation
+
+2. **StatisticalExtractor** (`feature_extractors/statistical.py`)
+   - 13 features per channel
+   - Basic statistical measures (mean, std, skew, kurt, etc.)
+   - Fully vectorized implementation
+
+3. **WelchExtractor** (`feature_extractors/welch.py`)
+   - 19 features per channel
+   - Power spectral density using Welch's method
+   - Dynamic frequency bins + predefined bands
+
+4. **MorphologicalExtractor** (`feature_extractors/morphological.py`)
+   - 50+ features per channel
+   - Wrapper around legacy implementation (TODO: refactor)
+   - Uses neurokit2 for waveform detection
+
+5. **NonlinearExtractor** (`feature_extractors/nonlinear.py`) [Optional]
+   - 30+ features per channel
+   - Requires: `pip install pte-ecg[nonlinear]`
+   - Wrapper around legacy implementation
+
+6. **WaveShapeExtractor** (`feature_extractors/waveshape.py`) [Optional]
+   - Bispectrum-based features
+   - Requires: `pip install pte-ecg[bispectrum]`
+   - Wrapper around legacy implementation
+
+#### Entry Points Configuration
+
+Extractors are registered in `pyproject.toml`:
+```toml
+[project.entry-points."pte_ecg.extractors"]
+fft = "pte_ecg.feature_extractors.fft:FFTExtractor"
+statistical = "pte_ecg.feature_extractors.statistical:StatisticalExtractor"
+welch = "pte_ecg.feature_extractors.welch:WelchExtractor"
+morphological = "pte_ecg.feature_extractors.morphological:MorphologicalExtractor"
+nonlinear = "pte_ecg.feature_extractors.nonlinear:NonlinearExtractor"
+waveshape = "pte_ecg.feature_extractors.waveshape:WaveShapeExtractor"
+```
+
+#### Creating Custom Extractors
+
+To create a custom extractor:
+
+1. Implement the `FeatureExtractorProtocol`:
+```python
+from pte_ecg.feature_extractors.base import BaseFeatureExtractor
+import numpy as np
+import pandas as pd
+
+class MyExtractor(BaseFeatureExtractor):
+    name = "my_extractor"
+    available_features = ["feature1", "feature2"]
+
+    def get_features(self, ecg: np.ndarray, sfreq: float) -> pd.DataFrame:
+        # Your implementation here
+        pass
+```
+
+2. Register via entry point in `pyproject.toml`:
+```toml
+[project.entry-points."pte_ecg.extractors"]
+my_extractor = "my_package.my_module:MyExtractor"
+```
+
+3. Configure in Settings:
+```python
+settings.features.my_extractor.enabled = True
+```
+
 ### Module Structure
 
 **`pipelines.py`** - Orchestration layer
@@ -81,14 +176,25 @@ pandas DataFrame (n_samples × n_features)
 - Handles Settings configuration (Pydantic models)
 - Coordinates preprocessing → feature extraction workflow
 
+**`feature_extractors/`** - Plugin-based feature extractors
+- **`registry.py`**: ExtractorRegistry for plugin discovery
+- **`base.py`**: Protocol and base class for extractors
+- **`fft.py`**: FFT frequency domain features
+- **`statistical.py`**: Statistical features
+- **`welch.py`**: Welch power spectral density features
+- **`morphological.py`**: Morphological waveform features
+- **`nonlinear.py`**: Nonlinear complexity features (optional)
+- **`waveshape.py`**: Bispectrum features (optional)
+
 **`preprocessing.py`** - Signal conditioning
 - Uses scipy.signal for filtering
 - Supports MNE-style preprocessing if available
 - All preprocessing is optional and configurable
 
-**`features.py`** - Feature extraction engine (MAIN FILE)
+**`features.py`** - Legacy feature extraction engine
+- Original implementation, now wrapped by new extractors
+- Contains morphological feature logic to be refactored
 - **Per-channel processing**: Most features computed independently per ECG lead
-- **Morphological features**: Uses neurokit2's `ecg_delineate()` for waveform detection
 - **Peak detection**: Multiple methods (prominence, dwt, cwt, etc.) with automatic fallback
 - **Parallel processing**: Uses multiprocessing for multi-sample datasets
 - **Territory-specific features**: Aggregates leads for regional cardiac markers
@@ -96,8 +202,8 @@ pandas DataFrame (n_samples × n_features)
 **`_logging.py`** - Centralized logging
 - Logger instance: `from ._logging import logger`
 
-**`ecg_feature_extractor.py`** - Legacy/reference implementation
-- Keep for comparison but new features go in `features.py`
+**`ecg_feature_extractor.py`** - Original reference implementation
+- Keep for comparison, not actively used
 
 ### Settings Architecture
 
@@ -195,7 +301,37 @@ except Exception:
 
 ## Current Development Status
 
-### ✅ Completed: Feature Consolidation
+### ✅ Completed: Plugin-Based Architecture Refactor (v0.4.0)
+
+**Extractor Migration Complete**
+All feature extractors migrated to plugin-based architecture:
+
+1. **FFTExtractor** - Fully refactored, vectorized (21 features/channel)
+2. **StatisticalExtractor** - Fully refactored, vectorized (13 features/channel)
+3. **WelchExtractor** - Fully refactored (19 features/channel)
+4. **MorphologicalExtractor** - Wrapped legacy implementation (50+ features/channel)
+5. **NonlinearExtractor** - Wrapped legacy implementation (30+ features/channel, optional)
+6. **WaveShapeExtractor** - Wrapped legacy implementation (bispectrum, optional)
+
+**Architecture Components**
+- ExtractorRegistry with entry point discovery
+- FeatureExtractorProtocol and BaseFeatureExtractor
+- All extractors registered in pyproject.toml
+- Comprehensive test suite passing (1,157 total features)
+- Code quality checks passing (ruff + ty)
+
+**Testing Status**
+- ✅ Individual extractor tests passing
+- ✅ Multi-extractor integration test passing
+- ✅ Registry discovery working (6 extractors found)
+- ✅ Feature counts validated:
+  - FFT: 252 features (2 samples × 12 channels × 21 features)
+  - Statistical: 156 features (2 × 12 × 13)
+  - Welch: 228 features (2 × 12 × 19)
+  - Morphological: 521 features
+  - All Core: 1,157 total features
+
+### ✅ Completed: Feature Consolidation (Previous)
 All morphological features successfully ported from `ecg_feature_extractor.py` to `features.py`:
 
 1. ST segment features (elevation, depression, J-point, slope)
@@ -211,20 +347,27 @@ All morphological features successfully ported from `ecg_feature_extractor.py` t
 
 ### Next Development Phases
 
-**Phase 1: Testing & Validation**
+**Phase 1: Legacy Extractor Refactoring**
+- Refactor MorphologicalExtractor from wrapper to native implementation
+- Refactor NonlinearExtractor from wrapper to native implementation
+- Refactor WaveShapeExtractor from wrapper to native implementation
+- Implement feature selection for refactored extractors
+
+**Phase 2: Testing & Validation**
 - Unit tests for each morphological feature
 - Integration tests with synthetic ECG data
 - Validation on PhysioNet datasets (MIT-BIH, PTB-XL)
+- Performance benchmarking
 
-**Phase 2: Performance Optimization**
+**Phase 3: Performance Optimization**
 - Profile morphological feature extraction (current: ~500ms per 10s ECG)
 - Optimize parallel processing
 - Target: <200ms per 10s ECG
 
-**Phase 3: Documentation & Cleanup**
+**Phase 4: Documentation & Cleanup**
 - Add clinical interpretation guide
 - Document expected ranges for each feature
-- Decide fate of `ecg_feature_extractor.py` (archive/delete/keep as reference)
+- Archive `ecg_feature_extractor.py` (reference only)
 
 ## Dependencies
 

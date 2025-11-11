@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.11.7",
     "pywavelets>=1.8.0", # This is actually a neurokit2 dependency
     "scipy>=1.15.3",
+    "tqdm>=4.66.0",
     "ts2vg>=1.2.4",      # This is actually a neurokit2 dependency
 ]
 dynamic = ["version"]
@@ -32,6 +33,14 @@ classifiers = [
     "Topic :: Scientific/Engineering",
     "Typing :: Typed",
 ]
+
+[project.entry-points."pte_ecg.extractors"]
+fft = "pte_ecg.feature_extractors.fft:FFTExtractor"
+morphological = "pte_ecg.feature_extractors.morphological:MorphologicalExtractor"
+statistical = "pte_ecg.feature_extractors.statistical:StatisticalExtractor"
+welch = "pte_ecg.feature_extractors.welch:WelchExtractor"
+nonlinear = "pte_ecg.feature_extractors.nonlinear:NonlinearExtractor"
+waveshape = "pte_ecg.feature_extractors.waveshape:WaveShapeExtractor"
 
 [dependency-groups]
 dev = ["mypy", "pre-commit", "tox"]

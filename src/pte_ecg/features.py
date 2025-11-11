@@ -16,10 +16,10 @@ import neurokit2 as nk
 import numpy as np
 import pandas as pd
 import pydantic
-import scipy.fft
 import scipy.signal
 import scipy.stats
 from pydantic import Field
+from tqdm import tqdm
 
 try:
     import pybispectra
@@ -41,6 +41,23 @@ except ImportError:
 from ._logging import logger
 
 EPS = 1e-10  # Small constant for numerical stability
+
+
+# Helper functions for multiprocessing with progress bars
+def _starmap_helper_stat(args: tuple) -> dict:
+    """Helper to unpack args for _stat_single_patient in multiprocessing."""
+    return _stat_single_patient(*args)
+
+
+def _starmap_helper_nonlinear(args: tuple) -> dict:
+    """Helper to unpack args for _nonlinear_single_patient in multiprocessing."""
+    return _nonlinear_single_patient(*args)
+
+
+def _starmap_helper_morph(args: tuple) -> dict:
+    """Helper to unpack args for _morph_single_patient in multiprocessing."""
+    return _morph_single_patient(*args)
+
 
 _METHODS_FINDPEAKS = [
     "neurokit",
@@ -417,14 +434,31 @@ def get_statistical_features(
     """
     assert_3_dims(ecg_data)
     start = _log_start("Statistical", ecg_data.shape[0])
-    args_list = ((ecg_single, sfreq) for ecg_single in ecg_data)
-    processes = _get_n_processes(n_jobs, ecg_data.shape[0])
+    n_samples = ecg_data.shape[0]
+    args_list = [(ecg_single, sfreq) for ecg_single in ecg_data]
+    processes = _get_n_processes(n_jobs, n_samples)
+
     if processes == 1:
-        results = [_stat_single_patient(*args) for args in args_list]
+        results = list(
+            tqdm(
+                (_stat_single_patient(*args) for args in args_list),
+                total=n_samples,
+                desc="Statistical features",
+                unit="sample",
+                disable=n_samples < 2,
+            )
+        )
     else:
         logger.info(f"Starting parallel processing with {processes} CPUs")
         with multiprocessing.Pool(processes=processes) as pool:
-            results = pool.starmap(_stat_single_patient, args_list)
+            results = list(
+                tqdm(
+                    pool.imap_unordered(_starmap_helper_stat, args_list),
+                    total=n_samples,
+                    desc="Statistical features",
+                    unit="sample",
+                )
+            )
     feature_df = pd.DataFrame(results)
     _log_end("Statistical", start, feature_df.shape)
     return feature_df
@@ -540,29 +574,42 @@ def get_nonlinear_features(
     """
     assert_3_dims(ecg_data)
     start = _log_start("Nonlinear", ecg_data.shape[0])
-    args_list = (
-        (sample_num, ecg_single, sfreq)
-        for sample_num, ecg_single in enumerate(ecg_data)
-    )
-    processes = _get_n_processes(n_jobs, ecg_data.shape[0])
+    n_samples = ecg_data.shape[0]
+    args_list = [(ecg_single, sfreq) for ecg_single in ecg_data]
+    processes = _get_n_processes(n_jobs, n_samples)
+
     if processes == 1:
-        results = [_nonlinear_single_patient(*args) for args in args_list]
+        results = list(
+            tqdm(
+                (_nonlinear_single_patient(*args) for args in args_list),
+                total=n_samples,
+                desc="Nonlinear features",
+                unit="sample",
+                disable=n_samples < 2,
+            )
+        )
     else:
         logger.info(f"Starting parallel processing with {processes} CPUs")
         with multiprocessing.Pool(processes=processes) as pool:
-            results = pool.starmap(_nonlinear_single_patient, args_list)
+            results = list(
+                tqdm(
+                    pool.imap_unordered(_starmap_helper_nonlinear, args_list),
+                    total=n_samples,
+                    desc="Nonlinear features",
+                    unit="sample",
+                )
+            )
     feature_df = pd.DataFrame(results)
     _log_end("Nonlinear", start, feature_df.shape)
     return feature_df
 
 
 def _nonlinear_single_patient(
-    sample_num: int, sample_data: np.ndarray, sfreq: float
+    sample_data: np.ndarray, sfreq: float
 ) -> dict[str, float]:
-    logger.info(f"Processing sample number: {sample_num}...")
     features: dict[str, float] = {}
     for ch_num, ch_data in enumerate(sample_data):
-        ch_feat = _nonlinear_single_channel(ch_data, sfreq, sample_num, ch_num)
+        ch_feat = _nonlinear_single_channel(ch_data, sfreq, ch_num)
         features.update(
             (f"nonlinear_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
         )
@@ -570,7 +617,7 @@ def _nonlinear_single_patient(
 
 
 def _nonlinear_single_channel(
-    ch_data: np.ndarray, sfreq: float, sample_num: int, ch_num: int
+    ch_data: np.ndarray, sfreq: float, ch_num: int
 ) -> dict[str, float]:
     """Extract nonlinear features from a single channel of ECG data.
 
@@ -612,7 +659,7 @@ def _nonlinear_single_channel(
         features["embedding_dimension"] = embedding_dim
     except IndexError as e:
         logger.warning(
-            f"Error calculating embedding dimension for channel {ch_num} sample {sample_num}: {e}"
+            f"Error calculating embedding dimension for channel {ch_num}: {e}"
         )
 
     # Lyapunov
@@ -622,9 +669,7 @@ def _nonlinear_single_channel(
         )
         features["dynamic_stability"] = np.exp(-np.abs(lyap_exp))
     except ValueError as e:
-        logger.warning(
-            f"Error calculating lyapunov exponent for channel {ch_num} sample {sample_num}: {e}"
-        )
+        logger.warning(f"Error calculating lyapunov exponent for channel {ch_num}: {e}")
 
     try:
         features["correlation_dimension"] = nolds.corr_dim(
@@ -632,7 +677,7 @@ def _nonlinear_single_channel(
         )
     except AssertionError as e:
         logger.warning(
-            f"Error calculating correlation dimension for channel {ch_num} sample {sample_num}: {e}"
+            f"Error calculating correlation dimension for channel {ch_num}: {e}"
         )
     # Too slow
     # # Fractal Dimension Higuchi
@@ -719,25 +764,37 @@ def get_morphological_features(
     """
     assert_3_dims(ecg_data)
     start = _log_start("Morphological", ecg_data.shape[0])
-    args_list = (
-        (sample_num, ecg_single, sfreq)
-        for sample_num, ecg_single in enumerate(ecg_data)
-    )
-    processes = _get_n_processes(n_jobs, ecg_data.shape[0])
+    n_samples = ecg_data.shape[0]
+    args_list = [(ecg_single, sfreq) for ecg_single in ecg_data]
+    processes = _get_n_processes(n_jobs, n_samples)
+
     if processes == 1:
-        results = [_morph_single_patient(*args) for args in args_list]
+        results = list(
+            tqdm(
+                (_morph_single_patient(*args) for args in args_list),
+                total=n_samples,
+                desc="Morphological features",
+                unit="sample",
+                disable=n_samples < 2,
+            )
+        )
     else:
         logger.info(f"Starting parallel processing with {processes} CPUs")
         with multiprocessing.Pool(processes=processes) as pool:
-            results = pool.starmap(_morph_single_patient, args_list)
+            results = list(
+                tqdm(
+                    pool.imap_unordered(_starmap_helper_morph, args_list),
+                    total=n_samples,
+                    desc="Morphological features",
+                    unit="sample",
+                )
+            )
     feature_df = pd.DataFrame(results)
     _log_end("Morphological", start, feature_df.shape)
     return feature_df
 
 
-def _morph_single_patient(
-    sample_num: int, sample_data: np.ndarray, sfreq: float
-) -> dict[str, float]:
+def _morph_single_patient(sample_data: np.ndarray, sfreq: float) -> dict[str, float]:
     """Extract morphological features from a single sample of ECG data.
 
     Args:
@@ -747,7 +804,6 @@ def _morph_single_patient(
     Returns:
         dict containing the extracted morphological features
     """
-    logger.info(f"Processing sample number: {sample_num}...")
     features: dict[str, float] = {}
     flat_chs = np.all(np.isclose(sample_data, sample_data[:, 0:1]), axis=1)
     if np.all(flat_chs):
@@ -756,7 +812,7 @@ def _morph_single_patient(
     for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs)):
         if is_flat:
             logger.warning(
-                f"Channel {ch_num} is flat line. Skipping morphological features."
+                f"Channel {ch_num} is a flat line. Skipping morphological features."
             )
             continue
         ch_feat = _morph_single_channel(ch_data, sfreq)
@@ -952,6 +1008,9 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", nk.misc.NeuroKitWarning)
+                warnings.simplefilter(
+                    "ignore", scipy.signal._peak_finding_utils.PeakPropertyWarning
+                )
                 _, waves_dict = nk.ecg_delineate(
                     ch_data,
                     rpeaks=r_peaks,
@@ -1142,15 +1201,27 @@ def _morph_single_channel(ch_data: np.ndarray, sfreq: float) -> dict[str, float]
     if n_r_peaks > 1:
         rr_intervals = np.diff(r_peaks) / sfreq
         rr_intervals = rr_intervals[~np.isnan(rr_intervals)]
-        features["rr_interval_mean"] = np.mean(rr_intervals)
-        features["rr_interval_std"] = np.std(rr_intervals)
+        mean_rr = np.mean(rr_intervals)
+        std_rr = np.std(rr_intervals)
+        features["rr_interval_mean"] = mean_rr
+        features["rr_interval_std"] = std_rr
         if len(rr_intervals) > 1:
             features["rr_interval_median"] = np.median(rr_intervals)
             features["rr_interval_iqr"] = np.percentile(
                 rr_intervals, 75
             ) - np.percentile(rr_intervals, 25)
-            features["rr_interval_skewness"] = scipy.stats.skew(rr_intervals)
-            features["rr_interval_kurtosis"] = scipy.stats.kurtosis(rr_intervals)
+            cv = std_rr / (abs(mean_rr) + EPS)
+            if cv > 0.01 and std_rr > 1e-6:  # Sufficient variance
+                features["rr_interval_skewness"] = scipy.stats.skew(rr_intervals)
+                features["rr_interval_kurtosis"] = scipy.stats.kurtosis(rr_intervals)
+            else:
+                # Data is nearly constant, skewness/kurtosis are meaningless
+                features["rr_interval_skewness"] = 0.0  # No skew
+                features["rr_interval_kurtosis"] = 0.0  # Normal kurtosis (excess=0)
+                logger.debug(
+                    f"RR intervals nearly constant (CV={cv:.6f}, std={std_rr:.6f}), "
+                    "skipping skewness/kurtosis calculation"
+                )
             # SD1: short-term variability
             diff_rr = np.diff(rr_intervals)
             sd1 = np.nanstd(diff_rr / np.sqrt(2))

@@ -8,34 +8,40 @@
 
 **Python Tools for Electrocardiography (PTE) - ECG**
 
-A Python package for extracting features from ECG signals.
+A Python package for extracting features from ECG signals with a modern plugin-based architecture.
 
-This package aims at providing an extensible and pluggable interface to extract features from raw ECG, while also providing reasonable default values for preprocessing.
+This package provides an extensible and pluggable interface to extract features from raw ECG data. Version 0.4.0 introduces a plugin-based architecture that allows easy customization and extension of feature extractors.
 
 ## Table of Contents
 - [✨ Highlights](#highlights)
 - [🚀 Installation](#installation)
-- [💻 Development setup](#development-setup)
+- [💻 Development Setup](#development-setup)
 - [🩺 Usage](#usage)
+  - [Basic Usage](#basic-usage)
+  - [Custom Configuration](#custom-configuration)
+  - [Creating Custom Extractors](#creating-custom-extractors)
+  - [Discovering Available Extractors](#discovering-available-extractors)
 - [📄 License](#license)
 - [🤝 Contributing](#contributing)
 
 
 ## Highlights
 
-- 🔩Configurable and pluggable feature extraction pipeline
-- ⚡️Efficient processing of multi-subject, multi-channel data
-- 🛠️ Preprocessing methods
+- 🔌 **Plugin-Based Architecture** - Easily extensible with custom feature extractors
+- 🔩 **Configurable Pipeline** - Enable/disable extractors and configure parameters
+- ⚡️ **Efficient Processing** - Multi-subject, multi-channel data support
+- 🛠️ **Preprocessing Methods**
   - Resampling
   - Bandpass filtering
   - Notch filtering
   - Normalization
-- 📊 Feature extraction methods
-  - FFT-based features
-  - Morphological features
-  - Nonlinear features
-  - Statistical features
-  - Welch's method-based features
+- 📊 **Feature Extraction Methods** (6 built-in extractors)
+  - **FFT** - Frequency domain features (21 features/channel)
+  - **Statistical** - Basic statistical measures (13 features/channel)
+  - **Welch** - Power spectral density (19 features/channel)
+  - **Morphological** - Waveform analysis, intervals, axes (50+ features/channel)
+  - **Nonlinear** - Entropy, fractal dimension, DFA (30+ features/channel) [Optional]
+  - **WaveShape** - Bispectrum-based features [Optional]
 
 
 ## 🚀 Installation
@@ -83,6 +89,8 @@ uv sync
 
 ## Usage
 
+### Basic Usage
+
 Here's a basic example of how to use the package to extract features from ECG data:
 
 ```python
@@ -92,36 +100,107 @@ import pte_ecg
 # Generate some synthetic ECG data (replace with your actual data)
 # Shape should be (n_channels, n_samples)
 sfreq = 1000  # Sampling frequency in Hz
-ecg_data = np.random.randn(1, 10000)  # 1 channel, 10 seconds at 1000 Hz
+ecg_data = np.random.randn(12, 10000)  # 12 leads, 10 seconds at 1000 Hz
 
-# Use default settings
+# Use default settings (all extractors enabled)
 settings = "default"
+features = pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)
 
-# Or use custom setting
+print(f"Extracted {len(features.columns)} features:\n{features.head()}")
+```
+
+### Custom Configuration
+
+```python
+import pte_ecg
+
+# Create custom settings
 settings = pte_ecg.Settings()
-settings.preprocessing.resample.enabled = True
-settings.preprocessing.resample.sfreq_new = sfreq / 2
 
+# Configure preprocessing
 settings.preprocessing.bandpass.enabled = True
 settings.preprocessing.bandpass.l_freq = 0.5
-settings.preprocessing.bandpass.h_freq = sfreq / 5
+settings.preprocessing.bandpass.h_freq = 40
 
 settings.preprocessing.notch.enabled = True
-settings.preprocessing.notch.freq = sfreq / 6
+settings.preprocessing.notch.freq = 50  # Remove 50 Hz powerline noise
 
 settings.preprocessing.normalize.enabled = True
 settings.preprocessing.normalize.mode = "zscore"
 
+# Enable/disable specific extractors
 settings.features.fft.enabled = True
-settings.features.morphological.enabled = False
-settings.features.nonlinear.enabled = False
-settings.features.welch.enabled = False
-settings.features.statistical.enabled = False
+settings.features.statistical.enabled = True
+settings.features.welch.enabled = True
+settings.features.morphological.enabled = True
+settings.features.nonlinear.enabled = False  # Disable optional extractors
+settings.features.waveshape.enabled = False
 
 # Extract features
 features = pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)
+```
 
-print(f"Extracted {len(features.columns)} features:\n{features.head()}")
+### Creating Custom Extractors
+
+The plugin architecture allows you to create custom feature extractors:
+
+```python
+from pte_ecg.feature_extractors.base import BaseFeatureExtractor
+import numpy as np
+import pandas as pd
+
+class MyCustomExtractor(BaseFeatureExtractor):
+    """Custom feature extractor example."""
+
+    name = "my_custom"
+    available_features = ["custom_feature_1", "custom_feature_2"]
+
+    def get_features(self, ecg: np.ndarray, sfreq: float) -> pd.DataFrame:
+        """Extract custom features from ECG data.
+
+        Args:
+            ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
+            sfreq: Sampling frequency in Hz
+
+        Returns:
+            DataFrame with custom features
+        """
+        n_samples, n_channels, n_timepoints = ecg.shape
+        features_list = []
+
+        for sample_idx in range(n_samples):
+            sample_features = {}
+            for ch_idx in range(n_channels):
+                channel_data = ecg[sample_idx, ch_idx, :]
+
+                # Your custom feature extraction logic here
+                sample_features[f"custom_feature_1_ch{ch_idx}"] = np.mean(channel_data)
+                sample_features[f"custom_feature_2_ch{ch_idx}"] = np.std(channel_data)
+
+            features_list.append(sample_features)
+
+        return pd.DataFrame(features_list)
+
+# Register your extractor in pyproject.toml:
+# [project.entry-points."pte_ecg.extractors"]
+# my_custom = "your_package.module:MyCustomExtractor"
+```
+
+### Discovering Available Extractors
+
+```python
+from pte_ecg.feature_extractors import ExtractorRegistry
+
+# Get the registry instance
+registry = ExtractorRegistry.get_instance()
+
+# List all available extractors
+extractors = registry.list_extractors()
+print(f"Available extractors: {extractors}")
+
+# Get a specific extractor
+fft_extractor = registry.get_extractor("fft")
+print(f"FFT extractor available features: {fft_extractor.available_features}")
 ```
 
 ## License

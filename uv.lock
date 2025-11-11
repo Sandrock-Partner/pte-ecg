@@ -1144,6 +1144,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pywavelets" },
     { name = "scipy" },
+    { name = "tqdm" },
     { name = "ts2vg" },
 ]
 
@@ -1181,6 +1182,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pywavelets", specifier = ">=1.8.0" },
     { name = "scipy", specifier = ">=1.15.3" },
+    { name = "tqdm", specifier = ">=4.66.0" },
     { name = "ts2vg", specifier = ">=1.2.4" },
 ]
 
