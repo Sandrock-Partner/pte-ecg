@@ -1,8 +1,24 @@
-"""Feature extraction module for ECG signal analysis.
+"""LEGACY: Feature extraction module for ECG signal analysis.
+
+.. deprecated:: 0.4.0
+    This module is deprecated and will be removed in version 1.0.0.
+    Use the new plugin-based architecture instead:
+    - Import extractors from `pte_ecg.feature_extractors`
+    - Use `pte_ecg.get_features()` with Settings configuration
+
+    Example::
+
+        import pte_ecg
+        settings = pte_ecg.Settings()
+        settings.features.morphological.enabled = True
+        features = pte_ecg.get_features(ecg_data, sfreq=1000, settings=settings)
 
 This module provides functions to extract various types of features from ECG signals,
 including statistical, morphological, and nonlinear features. It supports parallel
 processing for efficient computation on multi-channel ECG data.
+
+**NOTE**: This module is maintained for backward compatibility only. All new development
+should use the extractors in `pte_ecg.feature_extractors` package.
 """
 
 import multiprocessing
@@ -41,6 +57,26 @@ except ImportError:
 from ._logging import logger
 
 EPS = 1e-10  # Small constant for numerical stability
+
+
+def _deprecation_warning(feature_type: str) -> None:
+    """Issue a deprecation warning for legacy feature extraction functions.
+
+    Args:
+        feature_type: Type of feature being extracted (e.g., 'morphological', 'nonlinear')
+    """
+    warnings.warn(
+        f"The get_{feature_type}_features() function is deprecated and will be removed "
+        "in version 1.0.0. Use the new plugin-based architecture instead:\n"
+        f"  from pte_ecg.feature_extractors.{feature_type} import "
+        f"{feature_type.capitalize()}Extractor\n"
+        "  extractor = "
+        f"{feature_type.capitalize()}Extractor()\n"
+        "  features = extractor.get_features(ecg_data, sfreq)\n"
+        "Or use pte_ecg.get_features() with Settings configuration.",
+        DeprecationWarning,
+        stacklevel=2
+    )
 
 
 # Helper functions for multiprocessing with progress bars
@@ -191,6 +227,7 @@ def assert_3_dims(ecg_data: np.ndarray) -> None:
 def get_waveshape_features(
     ecg_data: np.ndarray, sfreq: float, n_jobs: int = -1
 ) -> pd.DataFrame:
+    _deprecation_warning("waveshape")
     if not HAS_PYBISPECTRA:
         raise ImportError(
             "pybispectra is required for waveshape features. "
@@ -271,6 +308,7 @@ def get_fft_features(ecg_data: np.ndarray, sfreq: float) -> pd.DataFrame:
     Raises:
         ValueError: If input data has incorrect dimensions
     """
+    _deprecation_warning("fft")
     assert_3_dims(ecg_data)
     start = _log_start("FFT", ecg_data.shape[0])
 
@@ -432,6 +470,7 @@ def get_statistical_features(
     Raises:
         ValueError: If input data has incorrect dimensions
     """
+    _deprecation_warning("statistical")
     assert_3_dims(ecg_data)
     start = _log_start("Statistical", ecg_data.shape[0])
     n_samples = ecg_data.shape[0]
@@ -572,6 +611,7 @@ def get_nonlinear_features(
     Raises:
         ValueError: If input data has incorrect dimensions
     """
+    _deprecation_warning("nonlinear")
     assert_3_dims(ecg_data)
     start = _log_start("Nonlinear", ecg_data.shape[0])
     n_samples = ecg_data.shape[0]
@@ -762,6 +802,7 @@ def get_morphological_features(
     Raises:
         ValueError: If input data has incorrect dimensions
     """
+    _deprecation_warning("morphological")
     assert_3_dims(ecg_data)
     start = _log_start("Morphological", ecg_data.shape[0])
     n_samples = ecg_data.shape[0]
@@ -1481,6 +1522,7 @@ def get_welch_features(ecg_data: np.ndarray, sfreq: float) -> pd.DataFrame:
     Raises:
         ValueError: If input data has incorrect dimensions
     """
+    _deprecation_warning("welch")
     assert_3_dims(ecg_data)
     start = _log_start("Welch", ecg_data.shape[0])
     n_samples, n_channels, n_timepoints = ecg_data.shape

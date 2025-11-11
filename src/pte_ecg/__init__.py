@@ -13,6 +13,7 @@ import pandas as pd
 from ._logging import logger, set_log_file, set_log_level
 from .config import ConfigLoader, ExtractorConfig, FeaturesConfig, Settings
 from .core import FeatureExtractor
+from .feature_extractors.registry import ExtractorRegistry
 from .preprocessing import (
     BandpassArgs,
     NormalizeArgs,
@@ -40,6 +41,7 @@ __all__ = [
     "ExtractorConfig",
     "ConfigLoader",
     "FeatureExtractor",
+    "ExtractorRegistry",
 ]
 
 
@@ -94,9 +96,13 @@ def get_features(
     elif isinstance(settings, (str, Path)):
         # Load from config file
         settings_obj = ConfigLoader.from_file(settings)
-    else:
-        # Assume it's already a Settings object
+    elif isinstance(settings, Settings):
+        # Use provided Settings object
         settings_obj = settings
+    else:
+        raise TypeError(
+            f"settings must be a Settings object, str, Path, or None, got {type(settings).__name__}"
+        )
 
     # Create extractor and run feature extraction
     extractor = FeatureExtractor(settings_obj)

@@ -1,6 +1,5 @@
 """Unit tests for the ECG feature extraction pipeline."""
 
-import neurokit2 as nk
 import numpy as np
 import pandas as pd
 import pytest
@@ -97,33 +96,8 @@ def test_get_features_empty_features(test_data: tuple[np.ndarray, int]):
         feature.enabled = False
 
     # Should raise ValueError when no features are enabled
-    with pytest.raises(ValueError, match="No features were extracted"):
+    with pytest.raises(ValueError, match="No feature extractors enabled"):
         pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)
-
-
-@pytest.fixture
-def test_data() -> tuple[np.ndarray, int]:
-    """Generate synthetic ECG data for testing.
-
-    Returns:
-        np.ndarray: ECG data with shape (n_recordings, n_channels, n_timepoints).
-    """
-    n_recordings = 1
-    sfreq = 100
-    duration = 10
-
-    ecg_data = np.zeros((n_recordings, duration * sfreq, 12))
-    for i in range(n_recordings):
-        ecg_data[i] = nk.ecg_simulate(
-            duration=duration,
-            sampling_rate=sfreq,
-            noise=0.01,
-            heart_rate=70,
-            method="multileads",
-            random_state=i,
-        )
-    ecg_data = np.transpose(ecg_data, (0, 2, 1))
-    return ecg_data, sfreq
 
 
 if __name__ == "__main__":

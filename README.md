@@ -189,17 +189,20 @@ class MyCustomExtractor(BaseFeatureExtractor):
 ### Discovering Available Extractors
 
 ```python
-from pte_ecg.feature_extractors import ExtractorRegistry
+import pte_ecg
 
 # Get the registry instance
-registry = ExtractorRegistry.get_instance()
+registry = pte_ecg.ExtractorRegistry()
 
 # List all available extractors
 extractors = registry.list_extractors()
 print(f"Available extractors: {extractors}")
 
-# Get a specific extractor
-fft_extractor = registry.get_extractor("fft")
+# Get a specific extractor class
+FFTExtractor = registry.get("fft")
+
+# Instantiate and use it
+fft_extractor = FFTExtractor()
 print(f"FFT extractor available features: {fft_extractor.available_features}")
 ```
 

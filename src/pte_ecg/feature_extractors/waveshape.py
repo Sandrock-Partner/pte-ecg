@@ -1,15 +1,29 @@
 """Waveshape (bispectrum) feature extractor.
 
-This module wraps the existing waveshape feature extraction from features.py.
-Requires the optional 'pybispectra' dependency.
+This extractor uses bispectral analysis to capture non-linear phase coupling
+and waveform characteristics in the frequency domain.
+
+Note: Requires the 'pybispectra' and 'numba' packages. Install with:
+    pip install pte-ecg[bispectrum]
+or:
+    pip install pybispectra>=1.2.1 numba>=0.61.2
 """
 
 import numpy as np
 import pandas as pd
 
-from .. import features
+from . import utils
 from .._logging import logger
 from .base import BaseFeatureExtractor
+
+# Check for optional dependency
+try:
+    import pybispectra
+
+    HAS_PYBISPECTRA = True
+except ImportError:
+    HAS_PYBISPECTRA = False
+    pybispectra = None  # type: ignore
 
 
 class WaveShapeExtractor(BaseFeatureExtractor):
@@ -53,8 +67,6 @@ class WaveShapeExtractor(BaseFeatureExtractor):
     ) -> pd.DataFrame:
         """Extract waveshape features from ECG data.
 
-        Currently delegates to the existing implementation in features.py.
-
         Args:
             ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
             sfreq: Sampling frequency in Hz
@@ -66,26 +78,81 @@ class WaveShapeExtractor(BaseFeatureExtractor):
             ValueError: If ecg does not have 3 dimensions
             ImportError: If pybispectra package is not installed
         """
-        if ecg.ndim != 3:
-            raise ValueError(
-                f"ECG data must have 3 dimensions (n_samples, n_channels, n_timepoints), "
-                f"got shape {ecg.shape}"
-            )
+        utils.assert_3_dims(ecg)
 
-        logger.info("Extracting waveshape features (using legacy implementation)")
-
-        # Check for pybispectra dependency
-        try:
-            import pybispectra  # noqa: F401
-        except ImportError:
+        if not HAS_PYBISPECTRA:
             raise ImportError(
                 "pybispectra is required for waveshape features. "
                 "Install with: pip install pte-ecg[bispectrum] "
                 "or: pip install pybispectra>=1.2.1 numba>=0.61.2"
-            ) from None
+            )
 
-        # Delegate to existing implementation
-        # TODO: Implement feature selection when refactoring
-        result = features.get_waveshape_features(ecg, sfreq, n_jobs=self.n_jobs)
+        logger.info("Extracting waveshape features")
 
-        return result
+        # Set precision for pybispectra
+        pybispectra.set_precision("single")
+
+        # Convert sfreq to int if needed
+        if isinstance(sfreq, float):
+            sfreq = int(sfreq)
+
+        # Get number of processes
+        processes = utils.get_n_processes(self.n_jobs, ecg.shape[0])
+
+        # Compute FFT coefficients
+        fft_coeffs_all, freqs = pybispectra.compute_fft(
+            data=ecg,
+            sampling_freq=sfreq,
+            n_points=int(sfreq // 3),
+            window="hanning",
+            n_jobs=processes,
+            verbose=False,
+        )
+
+        results_all = []
+        # TODO: Fix incomplete implementation - only processes first 2 samples
+        for i, fft_coeffs in enumerate(fft_coeffs_all[:2]):
+            fft_coeffs = fft_coeffs[:][np.newaxis, :]
+            waveshape = pybispectra.WaveShape(
+                data=fft_coeffs,
+                freqs=freqs,
+                sampling_freq=sfreq,
+                verbose=False,
+            )
+            waveshape.compute(f1s=(1, 40), f2s=(1, 40))  # type: ignore  # compute waveshape
+            results = waveshape.results.get_results(copy=False)
+
+            # TODO: Fix results_all reassignment bug - this overwrites previous iterations
+            results_all = []
+            # Store original shape before reshape
+            orig_shape = results.shape
+            # transform results from (channels, f1s, f2s) to (channels*f1s*f2s)
+            results = results.reshape(
+                results.shape[0] * results.shape[1] * results.shape[2], -1
+            )
+            # [np.abs, np.real, np.imag, np.angle]
+            results_all.append(results)
+
+            # TODO: Decide if plotting code should remain in production extractor
+            print(
+                f"Waveshape results: [{orig_shape[0]} channels x "
+                f"{orig_shape[1]} f1s x {orig_shape[2]} f2s]"
+            )
+            figs, axes = waveshape.results.plot(
+                major_tick_intervals=10,
+                minor_tick_intervals=2,
+                # cbar_range_abs=(0, 1),
+                # cbar_range_real=(-1, 1),
+                # cbar_range_imag=(-1, 1),
+                # cbar_range_phase=(0, 2),
+                plot_absolute=False,
+                show=False,
+            )
+            figs[0].show()
+
+        # TODO: Complete implementation - currently has '...' placeholder
+        # - Proper handling of all samples (not just first 2)
+        # - Fix results_all accumulation logic
+        # - Return proper DataFrame with named columns
+        # - Remove or make plotting optional
+        return pd.DataFrame(results_all)

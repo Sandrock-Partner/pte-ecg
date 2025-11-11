@@ -1,7 +1,6 @@
 """Plugin registry for feature extractors."""
 
 from importlib.metadata import entry_points
-from typing import Type
 
 from .._logging import logger
 from .base import FeatureExtractorProtocol
@@ -35,7 +34,7 @@ class ExtractorRegistry:
     """
 
     _instance: "ExtractorRegistry | None" = None
-    _extractors: dict[str, Type[FeatureExtractorProtocol]]
+    _extractors: dict[str, type[FeatureExtractorProtocol]]
 
     def __init__(self):
         """Initialize the registry and discover plugins."""
@@ -81,7 +80,9 @@ class ExtractorRegistry:
                 "Make sure entry points are defined in pyproject.toml."
             )
 
-    def register(self, name: str, extractor_class: Type[FeatureExtractorProtocol]) -> None:
+    def register(
+        self, name: str, extractor_class: type[FeatureExtractorProtocol]
+    ) -> None:
         """Manually register an extractor.
 
         Args:
@@ -98,7 +99,9 @@ class ExtractorRegistry:
             )
 
         # Verify it implements the protocol (basic check)
-        if not hasattr(extractor_class, "name") or not hasattr(extractor_class, "get_features"):
+        if not hasattr(extractor_class, "name") or not hasattr(
+            extractor_class, "get_features"
+        ):
             raise ValueError(
                 f"Extractor class {extractor_class} does not implement FeatureExtractorProtocol. "
                 "It must have 'name' attribute and 'get_features' method."
@@ -122,7 +125,7 @@ class ExtractorRegistry:
         del self._extractors[name]
         logger.info(f"Unregistered extractor: {name}")
 
-    def get(self, name: str) -> Type[FeatureExtractorProtocol]:
+    def get(self, name: str) -> type[FeatureExtractorProtocol]:
         """Get an extractor class by name.
 
         Args:
