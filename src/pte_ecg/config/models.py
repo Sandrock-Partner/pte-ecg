@@ -78,7 +78,7 @@ class FeaturesConfig(BaseModel):
         # Check if this is a known Pydantic field first
         if name in self.model_fields:
             return super().__getattribute__(name)
-        
+
         # For dynamic extractors, return a default config
         # Store it in __dict__ so it persists
         if name not in self.__dict__:
@@ -96,14 +96,14 @@ class FeaturesConfig(BaseModel):
         """
         enabled_extractors = []
         checked_names = set()
-        
+
         # Check hardcoded fields
         for name, field in self.model_fields.items():
             config = getattr(self, name, None)
             if isinstance(config, ExtractorConfig) and config.enabled:
                 enabled_extractors.append(name)
             checked_names.add(name)
-        
+
         # Check dynamic fields from model_dump (includes extra='allow' fields)
         dumped = self.model_dump()
         for name, value in dumped.items():
@@ -114,7 +114,7 @@ class FeaturesConfig(BaseModel):
                 elif isinstance(value, ExtractorConfig) and value.enabled:
                     enabled_extractors.append(name)
                 checked_names.add(name)
-        
+
         # Also check __dict__ for dynamically added configs (fallback)
         for name, value in self.__dict__.items():
             if name not in checked_names and isinstance(value, ExtractorConfig):

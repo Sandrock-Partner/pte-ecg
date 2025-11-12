@@ -59,16 +59,13 @@ class FeatureExtractor:
 
         registered_extractors = registry.list_extractors()
         if not registered_extractors:
-            raise ValueError(
-                "ExtractorRegistry is empty. "
-                "Define entry points in pyproject.toml to use the registry."
-            )
+            raise ValueError("ExtractorRegistry is empty. Define entry points in pyproject.toml to use the registry.")
 
         # Iterate through all registry-discovered extractors
         for extractor_name in registered_extractors:
             # Get config for this extractor, with fallback to default config
             extractor_config = getattr(self.settings.features, extractor_name, ExtractorConfig())
-            
+
             # Skip if extractor is disabled
             if not extractor_config.enabled:
                 logger.debug(f"Extractor '{extractor_name}' is disabled, skipping")

@@ -1,5 +1,6 @@
 # Project specific
 .archive
+output/
 
 # scikit-klearn
 __cachedir_pipe__

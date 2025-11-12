@@ -15,10 +15,9 @@ import scipy.signal
 import scipy.stats
 from tqdm import tqdm
 
-from . import utils
 from .._logging import logger
+from . import utils
 from .base import BaseFeatureExtractor
-
 
 # Peak detection methods to try (in order of preference)
 _METHODS_FINDPEAKS = [
@@ -40,9 +39,36 @@ _METHODS_FINDPEAKS = [
 
 # Type alias for peak detection methods
 PeakMethod = Literal[
-    "neurokit", "pantompkins", "nabian", "slopesumfunction", "zong",
-    "hamilton", "christov", "engzeemod", "elgendi", "kalidas",
-    "rodrigues", "vg", "emrich2023", "promac"
+    "neurokit",
+    "pantompkins",
+    "nabian",
+    "slopesumfunction",
+    "zong",
+    "hamilton",
+    "christov",
+    "engzeemod",
+    "elgendi",
+    "kalidas",
+    "rodrigues",
+    "vg",
+    "emrich2023",
+    "promac",
+]
+
+# Interval pairs for comprehensive statistics (wave1, wave2, feature_name)
+_INTERVAL_PAIRS = [
+    ("P", "R", "pr_interval"),
+    ("P", "Q", "pq_interval"),
+    ("Q", "R", "qr_interval"),
+    ("Q", "S", "qrs_duration"),
+    ("R", "S", "rs_interval"),
+    ("S", "T_onset", "st_duration"),
+    ("Q", "T", "qt_interval"),
+    ("R", "T_onset", "rt_duration"),
+    ("R", "T", "rt_interval"),
+    ("P", "T", "pt_interval"),
+    ("P_onset", "P_offset", "p_duration"),
+    ("T_onset", "T_offset", "t_duration"),
 ]
 
 
@@ -60,7 +86,7 @@ def _starmap_helper_morph(args: tuple) -> dict:
 
 class MorphologicalExtractor(BaseFeatureExtractor):
     """Extract morphological features from ECG waveforms.
-    
+
     This extractor performs comprehensive waveform analysis including:
     - P, Q, R, S, T wave detection and measurements
     - Interval calculations (QRS, QT, PR, etc.)
@@ -70,9 +96,11 @@ class MorphologicalExtractor(BaseFeatureExtractor):
     - T-wave symmetry
     - Electrical axes (multi-lead)
     - Territory-specific markers (12-lead ECG)
-    
-    Available features (50+ per channel):
-        - Durations: qrs_duration, qt_interval, pq_interval, etc.
+
+    Available features (80+ per channel):
+        - Intervals (mean, std, min, max): qrs_duration, qt_interval, pq_interval,
+          pr_interval, qr_interval, rs_interval, p_duration, t_duration,
+          st_duration, rt_duration, rt_interval, pt_interval
         - Amplitudes: p_amplitude, q_amplitude, r_amplitude, etc.
         - Areas: p_area, t_area
         - Slopes: r_slope, t_slope
@@ -81,83 +109,154 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         - RR intervals: rr_interval_mean, rr_interval_std, etc.
         - Advanced: qrs_fragmentation, qtc_interval, qt_rr_ratio, etc.
         - Global (12-lead): qrs_axis, p_axis, territory markers
-    
+
     Args:
         selected_features: List of features to extract (not yet implemented for filtering)
         n_jobs: Number of parallel jobs
-    
+
     Examples:
         # Extract all morphological features
         extractor = MorphologicalExtractor()
         features = extractor.get_features(ecg_data, sfreq=1000)
     """
-    
+
     name = "morphological"
-    
+
     available_features = [
-        # Durations and dispersions
-        "qrs_duration", "qrs_dispersion",
-        "qt_interval", "qt_dispersion", "qtc_interval",
-        "pq_interval", "pq_dispersion",
-        "p_duration", "p_dispersion",
-        "t_duration", "t_dispersion",
-        "st_duration", "st_dispersion",
-        "rt_duration", "rt_dispersion",
+        # Interval means
+        "qrs_duration",
+        "qt_interval",
+        "qtc_interval",
+        "pq_interval",
+        "pr_interval",
+        "qr_interval",
+        "rs_interval",
+        "p_duration",
+        "t_duration",
+        "st_duration",
+        "rt_duration",
+        "rt_interval",
+        "pt_interval",
+        # Interval std deviations
+        "qrs_duration_std",
+        "qt_interval_std",
+        "pq_interval_std",
+        "pr_interval_std",
+        "qr_interval_std",
+        "rs_interval_std",
+        "p_duration_std",
+        "t_duration_std",
+        "st_duration_std",
+        "rt_duration_std",
+        "rt_interval_std",
+        "pt_interval_std",
+        # Interval minimums
+        "qrs_duration_min",
+        "qt_interval_min",
+        "pq_interval_min",
+        "pr_interval_min",
+        "qr_interval_min",
+        "rs_interval_min",
+        "p_duration_min",
+        "t_duration_min",
+        "st_duration_min",
+        "rt_duration_min",
+        "rt_interval_min",
+        "pt_interval_min",
+        # Interval maximums
+        "qrs_duration_max",
+        "qt_interval_max",
+        "pq_interval_max",
+        "pr_interval_max",
+        "qr_interval_max",
+        "rs_interval_max",
+        "p_duration_max",
+        "t_duration_max",
+        "st_duration_max",
+        "rt_duration_max",
+        "rt_interval_max",
+        "pt_interval_max",
         # Amplitudes
-        "p_amplitude", "q_amplitude", "r_amplitude", "s_amplitude", "t_amplitude",
+        "p_amplitude",
+        "q_amplitude",
+        "r_amplitude",
+        "s_amplitude",
+        "t_amplitude",
         # Areas and slopes
-        "p_area", "t_area",
-        "r_slope", "t_slope",
+        "p_area",
+        "t_area",
+        "r_slope",
+        "t_slope",
         # ST segment
-        "st_elevation", "st_depression", "j_point_elevation", "st_slope",
+        "st_elevation",
+        "st_depression",
+        "j_point_elevation",
+        "st_slope",
         # T-wave analysis
-        "t_wave_inversion_depth", "t_symmetry",
+        "t_wave_inversion_depth",
+        "t_symmetry",
         # RR intervals
-        "rr_interval_mean", "rr_interval_std", "rr_interval_median",
-        "rr_interval_iqr", "rr_interval_skewness", "rr_interval_kurtosis",
-        "sd1", "sd2", "sd1_sd2_ratio",
+        "rr_interval_mean",
+        "rr_interval_std",
+        "rr_interval_median",
+        "rr_interval_iqr",
+        "rr_interval_skewness",
+        "rr_interval_kurtosis",
+        "sd1",
+        "sd2",
+        "sd1_sd2_ratio",
         # Advanced
         "qrs_fragmentation",
-        "qt_rr_ratio", "pr_rr_ratio", "t_qt_ratio",
+        "qt_rr_ratio",
+        "pr_rr_ratio",
+        "t_qt_ratio",
         # Multi-lead (global features)
-        "qrs_axis", "p_axis",
+        "qrs_axis",
+        "p_axis",
         # Territory-specific (12-lead only)
-        "V1_V3_ST_elevation", "V1_V4_T_inversion",
-        "V1_Q_amplitude", "V1_Q_to_R_ratio",
-        "II_III_aVF_ST_elevation", "II_III_aVF_T_inversion",
-        "III_Q_amplitude", "III_Q_to_R_ratio",
-        "I_aVL_V5_V6_ST_elevation", "I_aVL_V5_V6_T_inversion",
-        "V5_Q_amplitude", "V5_Q_to_R_ratio",
-        "V6_Q_amplitude", "V6_Q_to_R_ratio",
+        "V1_V3_ST_elevation",
+        "V1_V4_T_inversion",
+        "V1_Q_amplitude",
+        "V1_Q_to_R_ratio",
+        "II_III_aVF_ST_elevation",
+        "II_III_aVF_T_inversion",
+        "III_Q_amplitude",
+        "III_Q_to_R_ratio",
+        "I_aVL_V5_V6_ST_elevation",
+        "I_aVL_V5_V6_T_inversion",
+        "V5_Q_amplitude",
+        "V5_Q_to_R_ratio",
+        "V6_Q_amplitude",
+        "V6_Q_to_R_ratio",
         "aVR_ST_elevation",
     ]
-    
+
     def get_features(
         self,
         ecg: np.ndarray,
         sfreq: float,
     ) -> pd.DataFrame:
         """Extract morphological features from ECG data.
-        
+
         Args:
             ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
             sfreq: Sampling frequency in Hz
-        
+
         Returns:
             DataFrame with shape (n_samples, n_features) containing morphological features.
             Column names follow pattern: morphological_{feature_name}_ch{N} for per-channel
             features, and morphological_{feature_name} for global features.
-        
+
         Raises:
             ValueError: If ecg does not have 3 dimensions
         """
         utils.assert_3_dims(ecg)
-        
+
         start = utils.log_start("Morphological", ecg.shape[0])
         n_samples = ecg.shape[0]
         args_list = [(ecg_single, sfreq) for ecg_single in ecg]
         processes = utils.get_n_processes(self.n_jobs, n_samples)
-        
+
         if processes == 1:
             results = list(
                 tqdm(
@@ -179,15 +278,12 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                         unit="sample",
                     )
                 )
-        
+
         feature_df = pd.DataFrame(results)
         utils.log_end("Morphological", start, feature_df.shape)
         return feature_df
 
-
-    def _process_single_sample(
-        self, sample_data: np.ndarray, sfreq: float
-    ) -> dict[str, float]:
+    def _process_single_sample(self, sample_data: np.ndarray, sfreq: float) -> dict[str, float]:
         """Extract morphological features from a single sample (all channels).
 
         Args:
@@ -201,9 +297,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         return self._process_single_sample_static(sample_data, sfreq)
 
     @staticmethod
-    def _process_single_sample_static(
-        sample_data: np.ndarray, sfreq: float
-    ) -> dict[str, float]:
+    def _process_single_sample_static(sample_data: np.ndarray, sfreq: float) -> dict[str, float]:
         """Static version for multiprocessing compatibility.
 
         Args:
@@ -220,14 +314,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             return features
         for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs)):
             if is_flat:
-                logger.warning(
-                    f"Channel {ch_num} is a flat line. Skipping morphological features."
-                )
+                logger.warning(f"Channel {ch_num} is a flat line. Skipping morphological features.")
                 continue
             ch_feat = MorphologicalExtractor._process_single_channel_static(ch_data, sfreq)
-            features.update(
-                (f"morphological_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
-            )
+            features.update((f"morphological_{key}_ch{ch_num}", value) for key, value in ch_feat.items())
 
         # Calculate electrical axes (requires combining data from multiple channels)
         # Assumes standard 12-lead ECG ordering: I, II, III, aVR, aVL, aVF, V1-V6
@@ -235,26 +325,14 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         # QRS axis from R-wave amplitudes
         r_amp_lead_i = features.get("morphological_r_amplitude_ch0")
         r_amp_lead_avf = features.get("morphological_r_amplitude_ch5")
-        if (
-            r_amp_lead_i is not None
-            and r_amp_lead_avf is not None
-            and (r_amp_lead_i != 0 or r_amp_lead_avf != 0)
-        ):
-            features["morphological_qrs_axis"] = float(
-                np.arctan2(r_amp_lead_avf, r_amp_lead_i) * 180 / np.pi
-            )
+        if r_amp_lead_i is not None and r_amp_lead_avf is not None and (r_amp_lead_i != 0 or r_amp_lead_avf != 0):
+            features["morphological_qrs_axis"] = float(np.arctan2(r_amp_lead_avf, r_amp_lead_i) * 180 / np.pi)
 
         # P axis from P-wave amplitudes
         p_amp_lead_i = features.get("morphological_p_amplitude_ch0")
         p_amp_lead_avf = features.get("morphological_p_amplitude_ch5")
-        if (
-            p_amp_lead_i is not None
-            and p_amp_lead_avf is not None
-            and (p_amp_lead_i != 0 or p_amp_lead_avf != 0)
-        ):
-            features["morphological_p_axis"] = float(
-                np.arctan2(p_amp_lead_avf, p_amp_lead_i) * 180 / np.pi
-            )
+        if p_amp_lead_i is not None and p_amp_lead_avf is not None and (p_amp_lead_i != 0 or p_amp_lead_avf != 0):
+            features["morphological_p_axis"] = float(np.arctan2(p_amp_lead_avf, p_amp_lead_i) * 180 / np.pi)
 
         # Territory-Specific Markers (requires 12-lead ECG)
         # Standard 12-lead ordering: I, II, III, aVR, aVL, aVF, V1-V6
@@ -262,69 +340,41 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             # ANTERIOR WALL (LAD Territory - V1-V4)
             v1_v3_leads = [6, 7, 8]
             v1_v4_leads = [6, 7, 8, 9]
-            v1_v3_st_elev = np.mean(
-                [
-                    features.get(f"morphological_st_elevation_ch{ch}", 0.0)
-                    for ch in v1_v3_leads
-                ]
-            )
+            v1_v3_st_elev = np.mean([features.get(f"morphological_st_elevation_ch{ch}", 0.0) for ch in v1_v3_leads])
             features["morphological_V1_V3_ST_elevation"] = float(v1_v3_st_elev)
 
             v1_v4_t_inv = np.mean(
-                [
-                    features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0)
-                    for ch in v1_v4_leads
-                ]
+                [features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0) for ch in v1_v4_leads]
             )
             features["morphological_V1_V4_T_inversion"] = float(v1_v4_t_inv)
 
             q_v1 = abs(features.get("morphological_q_amplitude_ch6", 0.0))
             r_v1 = features.get("morphological_r_amplitude_ch6", 1.0)
             features["morphological_V1_Q_amplitude"] = float(q_v1)
-            features["morphological_V1_Q_to_R_ratio"] = (
-                float(q_v1 / r_v1) if r_v1 > 0 else 0.0
-            )
+            features["morphological_V1_Q_to_R_ratio"] = float(q_v1 / r_v1) if r_v1 > 0 else 0.0
 
             # INFERIOR WALL (RCA Territory - II, III, aVF)
             inferior_leads = [1, 2, 5]
-            inf_st_elev = np.mean(
-                [
-                    features.get(f"morphological_st_elevation_ch{ch}", 0.0)
-                    for ch in inferior_leads
-                ]
-            )
+            inf_st_elev = np.mean([features.get(f"morphological_st_elevation_ch{ch}", 0.0) for ch in inferior_leads])
             features["morphological_II_III_aVF_ST_elevation"] = float(inf_st_elev)
 
             inf_t_inv = np.mean(
-                [
-                    features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0)
-                    for ch in inferior_leads
-                ]
+                [features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0) for ch in inferior_leads]
             )
             features["morphological_II_III_aVF_T_inversion"] = float(inf_t_inv)
 
             q_iii = abs(features.get("morphological_q_amplitude_ch2", 0.0))
             r_iii = features.get("morphological_r_amplitude_ch2", 1.0)
             features["morphological_III_Q_amplitude"] = float(q_iii)
-            features["morphological_III_Q_to_R_ratio"] = (
-                float(q_iii / r_iii) if r_iii > 0 else 0.0
-            )
+            features["morphological_III_Q_to_R_ratio"] = float(q_iii / r_iii) if r_iii > 0 else 0.0
 
             # LATERAL WALL (LCX Territory - I, aVL, V5, V6)
             lateral_leads = [0, 4, 10, 11]
-            lat_st_elev = np.mean(
-                [
-                    features.get(f"morphological_st_elevation_ch{ch}", 0.0)
-                    for ch in lateral_leads
-                ]
-            )
+            lat_st_elev = np.mean([features.get(f"morphological_st_elevation_ch{ch}", 0.0) for ch in lateral_leads])
             features["morphological_I_aVL_V5_V6_ST_elevation"] = float(lat_st_elev)
 
             lat_t_inv = np.mean(
-                [
-                    features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0)
-                    for ch in lateral_leads
-                ]
+                [features.get(f"morphological_t_wave_inversion_depth_ch{ch}", 0.0) for ch in lateral_leads]
             )
             features["morphological_I_aVL_V5_V6_T_inversion"] = float(lat_t_inv)
 
@@ -334,24 +384,16 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             r_v6 = features.get("morphological_r_amplitude_ch11", 1.0)
 
             features["morphological_V5_Q_amplitude"] = float(q_v5)
-            features["morphological_V5_Q_to_R_ratio"] = (
-                float(q_v5 / r_v5) if r_v5 > 0 else 0.0
-            )
+            features["morphological_V5_Q_to_R_ratio"] = float(q_v5 / r_v5) if r_v5 > 0 else 0.0
             features["morphological_V6_Q_amplitude"] = float(q_v6)
-            features["morphological_V6_Q_to_R_ratio"] = (
-                float(q_v6 / r_v6) if r_v6 > 0 else 0.0
-            )
+            features["morphological_V6_Q_to_R_ratio"] = float(q_v6 / r_v6) if r_v6 > 0 else 0.0
 
             # GLOBAL PATTERNS (aVR)
-            features["morphological_aVR_ST_elevation"] = float(
-                features.get("morphological_st_elevation_ch3", 0.0)
-            )
+            features["morphological_aVR_ST_elevation"] = float(features.get("morphological_st_elevation_ch3", 0.0))
 
         return features
 
-    def _process_single_channel(
-        self, ch_data: np.ndarray, sfreq: float
-    ) -> dict[str, float]:
+    def _process_single_channel(self, ch_data: np.ndarray, sfreq: float) -> dict[str, float]:
         """Extract morphological features from a single channel.
 
         Args:
@@ -364,9 +406,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         return self._process_single_channel_static(ch_data, sfreq)
 
     @staticmethod
-    def _process_single_channel_static(
-        ch_data: np.ndarray, sfreq: float
-    ) -> dict[str, float]:
+    def _process_single_channel_static(ch_data: np.ndarray, sfreq: float) -> dict[str, float]:
         """Static method for processing a single channel (multiprocessing compatible).
 
         Args:
@@ -394,9 +434,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         else:
             # High sampling rate: use all methods with optimized order
             methods = ["prominence", "dwt", "cwt", "peak"]
-            logger.debug(
-                f"Using high-frequency optimized methods for {sfreq} Hz: {methods}"
-            )
+            logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
 
         for method in methods:
             if n_r_peaks < 2 and method in {"prominence", "cwt"}:
@@ -406,7 +444,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", nk.misc.NeuroKitWarning)  # type: ignore
                     warnings.simplefilter(
-                        "ignore", scipy.signal._peak_finding_utils.PeakPropertyWarning  # type: ignore
+                        "ignore",
+                        scipy.signal._peak_finding_utils.PeakPropertyWarning,  # type: ignore
                     )
                     _, waves_dict = nk.ecg_delineate(
                         ch_data,
@@ -444,90 +483,36 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         n_t_onsets = len(t_onsets) if t_onsets is not None else 0
         n_t_offsets = len(t_offsets) if t_offsets is not None else 0
 
-        # QRS-Dauer
-        if n_q_peaks and n_s_peaks:
-            # Berechne durchschnittliche QRS-Dauer
-            qrs_durations: list[float] = []
-            max_index = min(n_q_peaks, n_s_peaks)
-            for q, s in zip(q_peaks[:max_index], s_peaks[:max_index]):
-                if q >= s or np.isnan(q) or np.isnan(s):
-                    continue
-                qrs_durations.append((s - q) / sfreq * 1000)  # in ms
-            if qrs_durations:
-                features["qrs_duration"] = float(np.mean(qrs_durations))
-                features["qrs_dispersion"] = float(np.std(qrs_durations))
+        # Build wave indices dictionary for vectorized interval calculation
+        wave_indices = {
+            "P": p_peaks if n_p_peaks else np.array([]),
+            "Q": q_peaks if n_q_peaks else np.array([]),
+            "R": r_peaks if (n_r_peaks and r_peaks is not None) else np.array([]),
+            "S": s_peaks if n_s_peaks else np.array([]),
+            "T": t_peaks if n_t_peaks else np.array([]),
+            "P_onset": p_onsets if n_p_onsets else np.array([]),
+            "P_offset": p_offsets if n_p_offsets else np.array([]),
+            "T_onset": t_onsets if n_t_onsets else np.array([]),
+            "T_offset": t_offsets if n_t_offsets else np.array([]),
+        }
 
-        # QT-Intervall
-        if n_q_peaks and n_t_peaks:
-            qt_intervals = []
-            max_index = min(n_q_peaks, n_t_peaks)
-            for q, t in zip(q_peaks[:max_index], t_peaks[:max_index]):
-                if q >= t or np.isnan(q) or np.isnan(t):
-                    continue
-                qt_intervals.append((t - q) / sfreq * 1000)  # in ms
-            if qt_intervals:
-                features["qt_interval"] = float(np.mean(qt_intervals))
-                features["qt_dispersion"] = float(np.std(qt_intervals))
+        # Vectorized interval calculation for all pairs
+        for wave1, wave2, feature_name in _INTERVAL_PAIRS:
+            peaks1 = wave_indices.get(wave1)
+            peaks2 = wave_indices.get(wave2)
 
-        # PQ-Intervall
-        if n_p_peaks and n_q_peaks:
-            pq_intervals = []
-            max_index = min(n_p_peaks, n_q_peaks)
-            for p, q in zip(p_peaks[:max_index], q_peaks[:max_index]):
-                if p >= q or np.isnan(p) or np.isnan(q):
-                    continue
-                pq_intervals.append((q - p) / sfreq * 1000)  # in ms
-            if pq_intervals:
-                features["pq_interval"] = float(np.mean(pq_intervals))
-                features["pq_dispersion"] = float(np.std(pq_intervals))
+            if peaks1 is None or peaks2 is None:
+                continue
+            if len(peaks1) == 0 or len(peaks2) == 0:
+                continue
 
-        # P-Dauer
-        if n_p_onsets and n_p_offsets:
-            p_durations = []
-            max_index = min(n_p_onsets, n_p_offsets)
-            for p_on, p_off in zip(p_onsets[:max_index], p_offsets[:max_index]):
-                if p_on >= p_off or np.isnan(p_on) or np.isnan(p_off):
-                    continue
-                p_durations.append((p_off - p_on) / sfreq * 1000)
-            if p_durations:
-                features["p_duration"] = float(np.mean(p_durations))
-                features["p_dispersion"] = float(np.std(p_durations))
+            stats = MorphologicalExtractor._calculate_interval_stats(peaks1, peaks2, sfreq)
 
-        # T-Dauer
-        if n_t_onsets and n_t_offsets:
-            t_durations = []
-            max_index = min(n_t_onsets, n_t_offsets)
-            for t_on, t_off in zip(t_onsets[:max_index], t_offsets[:max_index]):
-                if t_on >= t_off or np.isnan(t_on) or np.isnan(t_off):
-                    continue
-                t_durations.append((t_off - t_on) / sfreq * 1000)
-            if t_durations:
-                features["t_duration"] = float(np.mean(t_durations))
-                features["t_dispersion"] = float(np.std(t_durations))
-
-        # ST-Dauer
-        if n_s_peaks and n_t_onsets:
-            st_durations = []
-            max_index = min(n_s_peaks, n_t_onsets)
-            for s, t_on in zip(s_peaks[:max_index], t_onsets[:max_index]):
-                if s >= t_on or np.isnan(s) or np.isnan(t_on):
-                    continue
-                st_durations.append(t_on - s)
-            if st_durations:
-                features["st_duration"] = float(np.mean(st_durations) / sfreq * 1000)
-                features["st_dispersion"] = float(np.std(st_durations) / sfreq * 1000)
-
-        # RT-Dauer
-        if n_r_peaks and n_t_onsets and r_peaks is not None:
-            rt_durations = []
-            max_index = min(n_r_peaks, n_t_onsets)
-            for r, t_on in zip(r_peaks[:max_index], t_onsets[:max_index]):
-                if r >= t_on or np.isnan(r) or np.isnan(t_on):
-                    continue
-                rt_durations.append((t_on - r) / sfreq * 1000)
-            if rt_durations:
-                features["rt_duration"] = float(np.mean(rt_durations))
-                features["rt_dispersion"] = float(np.std(rt_durations))
+            if stats:
+                features[feature_name] = stats["mean"]
+                features[f"{feature_name}_std"] = stats["std"]
+                features[f"{feature_name}_min"] = stats["min"]
+                features[f"{feature_name}_max"] = stats["max"]
 
         # Flächen (Integrale unter den Kurven)
         if n_p_onsets and n_p_offsets:
@@ -604,9 +589,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             features["rr_interval_std"] = std_rr
             if len(rr_intervals) > 1:
                 features["rr_interval_median"] = float(np.median(rr_intervals))
-                features["rr_interval_iqr"] = float(
-                    np.percentile(rr_intervals, 75) - np.percentile(rr_intervals, 25)
-                )
+                features["rr_interval_iqr"] = float(np.percentile(rr_intervals, 75) - np.percentile(rr_intervals, 25))
                 cv = std_rr / (abs(mean_rr) + utils.EPS)
                 if cv > 0.01 and std_rr > 1e-6:  # Sufficient variance
                     features["rr_interval_skewness"] = scipy.stats.skew(rr_intervals)
@@ -628,9 +611,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 sd2 = float(np.sqrt(interm)) if interm > 0 else np.nan
                 features["sd1"] = sd1
                 features["sd2"] = sd2
-                features["sd1_sd2_ratio"] = (
-                    sd1 / (sd2 + utils.EPS) if not np.isnan(sd2) else np.nan
-                )
+                features["sd1_sd2_ratio"] = sd1 / (sd2 + utils.EPS) if not np.isnan(sd2) else np.nan
 
         if n_s_peaks:
             s_amplitudes = [ch_data[s] for s in s_peaks if not np.isnan(s)]
@@ -733,9 +714,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             if st_depressions:
                 features["st_depression"] = float(np.mean(st_depressions))
             if st_elevations and st_depressions:
-                features["j_point_elevation"] = features.get(
-                    "st_elevation", 0.0
-                ) - features.get("st_depression", 0.0)
+                features["j_point_elevation"] = features.get("st_elevation", 0.0) - features.get("st_depression", 0.0)
             if st_slopes:
                 features["st_slope"] = float(np.mean(st_slopes))
 
@@ -770,9 +749,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         return features
 
     @staticmethod
-    def _detect_r_peaks(
-        ch_data: np.ndarray, sfreq: float
-    ) -> tuple[np.ndarray | None, int, PeakMethod | None]:
+    def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | None, int, PeakMethod | None]:
         """Detect R-peaks using multiple methods with automatic fallback.
 
         Args:
@@ -787,9 +764,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         for method in _METHODS_FINDPEAKS:
             _, peaks_info = nk.ecg_peaks(
                 ch_data,
-                sampling_rate=np.rint(sfreq).astype(int)
-                if method in ["zong", "emrich2023"]
-                else sfreq,
+                sampling_rate=np.rint(sfreq).astype(int) if method in ["zong", "emrich2023"] else sfreq,
                 method=method,
             )
             r_peaks: np.ndarray | None = peaks_info["ECG_R_Peaks"]
@@ -806,3 +781,40 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         for method, r_peaks in peaks_per_method.items():
             return r_peaks, max_n_peaks, method  # return first item
         return None, 0, None
+
+    @staticmethod
+    def _calculate_interval_stats(peaks1: np.ndarray, peaks2: np.ndarray, sfreq: float) -> dict[str, float]:
+        """Vectorized interval statistics calculation.
+
+        Args:
+            peaks1: First wave peaks (e.g., Q peaks)
+            peaks2: Second wave peaks (e.g., S peaks)
+            sfreq: Sampling frequency in Hz
+
+        Returns:
+            Dictionary with mean, std, min, max in milliseconds, or empty dict if no valid intervals
+        """
+        # Ensure arrays are numpy arrays (might be lists from neurokit2)
+        p1 = np.asarray(peaks1)
+        p2 = np.asarray(peaks2)
+
+        n = min(len(p1), len(p2))
+        if n == 0:
+            return {}
+
+        p1 = p1[:n]
+        p2 = p2[:n]
+
+        valid_mask = (p1 < p2) & ~np.isnan(p1) & ~np.isnan(p2)
+
+        if not np.any(valid_mask):
+            return {}
+
+        intervals_ms = (p2[valid_mask] - p1[valid_mask]) / sfreq * 1000
+
+        return {
+            "mean": float(np.mean(intervals_ms)),
+            "std": float(np.std(intervals_ms)),
+            "min": float(np.min(intervals_ms)),
+            "max": float(np.max(intervals_ms)),
+        }

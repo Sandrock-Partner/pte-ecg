@@ -10,7 +10,9 @@
       "WebSearch",
       "Bash(python:*)",
       "Bash(nul)",
-      "Bash(uv run pytest:*)"
+      "Bash(uv run pytest:*)",
+      "Bash(uv add:*)",
+      "Bash(dir \"C:\\AI_Data\\approach3A\\*.h5\" /b)"
     ],
     "deny": [],
     "ask": []

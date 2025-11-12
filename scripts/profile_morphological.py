@@ -18,12 +18,10 @@ import neurokit2 as nk
 import numpy as np
 
 # Import the function to profile
-from src.pte_ecg.features import _get_r_peaks, _morph_single_patient
+from pte_ecg.features import _get_r_peaks, _morph_single_patient
 
 
-def load_real_ecg_data(
-    n_channels: int = 12, duration: float = 10.0, sfreq: float = 500.0
-) -> np.ndarray:
+def load_real_ecg_data(n_channels: int = 12, duration: float = 10.0, sfreq: float = 500.0) -> np.ndarray:
     """Load real ECG data from NeuroKit2 and replicate it across channels."""
     # Load a real ECG signal from NeuroKit2
     ecg_signal = nk.data("ecg_3000hz")
@@ -59,13 +57,9 @@ def load_real_ecg_data(
         # Add small phase shift to simulate different lead positions
         phase_shift = np.random.randint(-10, 11)  # ±10 samples
         if phase_shift > 0:
-            shifted_signal = np.concatenate(
-                [ecg_signal[phase_shift:], ecg_signal[:phase_shift]]
-            )
+            shifted_signal = np.concatenate([ecg_signal[phase_shift:], ecg_signal[:phase_shift]])
         elif phase_shift < 0:
-            shifted_signal = np.concatenate(
-                [ecg_signal[phase_shift:], ecg_signal[:phase_shift]]
-            )
+            shifted_signal = np.concatenate([ecg_signal[phase_shift:], ecg_signal[:phase_shift]])
         else:
             shifted_signal = ecg_signal
 
@@ -98,9 +92,7 @@ def profile_with_line_profiler(func, *args, **kwargs) -> tuple[Any, float]:
     return result, execution_time
 
 
-def profile_ecg_delineation_methods(
-    sample_data: np.ndarray, sfreq: float
-) -> dict[str, dict[str, float]]:
+def profile_ecg_delineation_methods(sample_data: np.ndarray, sfreq: float) -> dict[str, dict[str, float]]:
     """Profile each ECG delineation method separately."""
     # Use first channel for method comparison
     ch_data = sample_data[0]
@@ -219,22 +211,22 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
     """Profile morphological feature extraction at a specific sampling frequency."""
     print(f"\n=== Profiling at {sfreq} Hz ===")
     print("Loading real ECG data from NeuroKit2...")
-    
+
     sample_data = load_real_ecg_data(n_channels, duration, sfreq)
     print(f"Loaded ECG data: {sample_data.shape} (channels x samples)")
     print(f"Sampling frequency: {sfreq} Hz")
     print(f"Duration: {duration:.1f} seconds\n")
-    
+
     results = {}
-    
+
     # 1. Simple timing profile
     print("1. Simple Timing Profile:")
     print("-" * 40)
     result, execution_time = profile_with_line_profiler(_morph_single_patient, 0, sample_data, sfreq)
     print(f"Total execution time: {execution_time:.4f} seconds")
     print(f"Features extracted: {len(result)}")
-    results['total_time'] = execution_time
-    results['features_extracted'] = len(result)
+    results["total_time"] = execution_time
+    results["features_extracted"] = len(result)
     print()
 
     # 2. ECG Delineation Method Comparison
@@ -242,19 +234,17 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
     print("-" * 50)
     method_results = profile_ecg_delineation_methods(sample_data, sfreq)
 
-    print(
-        f"{'Method':<12} {'Success':<8} {'Time (s)':<10} {'Features':<10} {'Error':<30}"
-    )
+    print(f"{'Method':<12} {'Success':<8} {'Time (s)':<10} {'Features':<10} {'Error':<30}")
     print("-" * 70)
 
     successful_methods = []
     for method, info in method_results.items():
         success_str = "Y" if info["success"] else "N"
-        time_str = f"{info['time']:.4f}" if info['time'] is not None and info['time'] > 0 else "N/A"
+        time_str = f"{info['time']:.4f}" if info["time"] is not None and info["time"] > 0 else "N/A"
         features_str = str(info["features_detected"]) if info["success"] else "N/A"
         error_msg = info.get("error", "") or ""
         error_str = error_msg[:28] + "..." if error_msg and len(error_msg) > 28 else error_msg
-        
+
         print(f"{method:<12} {success_str:<8} {time_str:<10} {features_str:<10} {error_str:<30}")
 
         if info["success"]:
@@ -278,20 +268,14 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
         elif component == "n_r_peaks":
             print(f"{component:25s}: {value}")
         else:
-            percentage = (
-                (value / timing_results["total_time"]) * 100
-                if "total_time" in timing_results
-                else 0
-            )
+            percentage = (value / timing_results["total_time"]) * 100 if "total_time" in timing_results else 0
             print(f"{component:25s}: {value:.4f}s ({percentage:5.1f}%)")
     print()
 
     # 4. cProfile analysis
     print("4. cProfile Analysis:")
     print("-" * 40)
-    result, stats = profile_function_with_cprofile(
-        _morph_single_patient, 0, sample_data, sfreq
-    )
+    result, stats = profile_function_with_cprofile(_morph_single_patient, 0, sample_data, sfreq)
 
     # Sort by cumulative time and show top functions
     stats.sort_stats("cumulative")
@@ -337,13 +321,9 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
     for n_ch in channel_counts:
         if n_ch <= n_channels:
             test_data = sample_data[:n_ch]
-            _, exec_time = profile_with_line_profiler(
-                _morph_single_patient, 0, test_data, sfreq
-            )
+            _, exec_time = profile_with_line_profiler(_morph_single_patient, 0, test_data, sfreq)
             time_per_channel = exec_time / n_ch
-            print(
-                f"{n_ch:2d} channels: {exec_time:.4f}s total, {time_per_channel:.4f}s per channel"
-            )
+            print(f"{n_ch:2d} channels: {exec_time:.4f}s total, {time_per_channel:.4f}s per channel")
 
     print("\n=== Profiling Complete ===")
 
@@ -357,9 +337,7 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
 
         f.write("ECG Delineation Method Comparison:\n")
         f.write("-" * 50 + "\n")
-        f.write(
-            f"{'Method':<12} {'Success':<8} {'Time (s)':<10} {'Features':<10} {'Error':<30}\n"
-        )
+        f.write(f"{'Method':<12} {'Success':<8} {'Time (s)':<10} {'Features':<10} {'Error':<30}\n")
         f.write("-" * 70 + "\n")
 
         for method, info in method_results.items():
@@ -367,14 +345,8 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
             time_str = f"{info['time']:.4f}" if info["time"] > 0 else "N/A"
             features_str = str(info["features_detected"]) if info["success"] else "N/A"
             error_msg = info.get("error", "")
-            error_str = (
-                error_msg[:28] + "..."
-                if error_msg and len(error_msg) > 28
-                else error_msg
-            )
-            f.write(
-                f"{method:<12} {success_str:<8} {time_str:<10} {features_str:<10} {error_str:<30}\n"
-            )
+            error_str = error_msg[:28] + "..." if error_msg and len(error_msg) > 28 else error_msg
+            f.write(f"{method:<12} {success_str:<8} {time_str:<10} {features_str:<10} {error_str:<30}\n")
 
         f.write("\nDetailed Timing Breakdown:\n")
         f.write("-" * 40 + "\n")
@@ -384,11 +356,7 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
             elif component == "n_r_peaks":
                 f.write(f"{component:25s}: {value}\n")
             else:
-                percentage = (
-                    (value / timing_results["total_time"]) * 100
-                    if "total_time" in timing_results
-                    else 0
-                )
+                percentage = (value / timing_results["total_time"]) * 100 if "total_time" in timing_results else 0
                 f.write(f"{component:25s}: {value:.4f}s ({percentage:5.1f}%)\n")
 
         f.write("\ncProfile Analysis:\n")
@@ -399,5 +367,4 @@ def profile_at_frequency(sfreq: float, n_channels: int = 12, duration: float = 1
 
 
 if __name__ == "__main__":
-    main()
     main()

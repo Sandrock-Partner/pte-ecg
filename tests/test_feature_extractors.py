@@ -177,7 +177,7 @@ class TestMorphologicalExtractor:
         # Check for common morphological features (they include channel suffix)
         expected_features = [
             "morphological_qrs_duration_ch",
-            "morphological_qrs_dispersion_ch",
+            "morphological_qrs_duration_std_ch",
             "morphological_rr_interval_mean_ch",
         ]
         for feature in expected_features:
