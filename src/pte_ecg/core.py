@@ -123,9 +123,19 @@ class FeatureExtractor:
             )
 
         n_samples, n_channels, n_timepoints = ecg.shape
+
+        # Validate that number of channels matches the lead_order
+        expected_n_channels = len(self.settings.lead_order)
+        if n_channels != expected_n_channels:
+            raise ValueError(
+                f"ECG data has {n_channels} channels, but lead_order specifies {expected_n_channels} leads. "
+                f"Expected lead order: {self.settings.lead_order}. "
+                f"Please ensure your ECG data has the same number of channels as specified in lead_order."
+            )
+
         logger.info(
             f"Extracting features from {n_samples} samples with {n_channels} channels "
-            f"and {n_timepoints} timepoints at {sfreq} Hz"
+            f"(leads: {self.settings.lead_order}) and {n_timepoints} timepoints at {sfreq} Hz"
         )
 
         # Apply preprocessing
@@ -166,30 +176,33 @@ def get_features(
     configuration loading and orchestrates the complete feature extraction pipeline.
 
     Args:
-        ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
+        ecg: ECG data with shape (n_samples, n_channels, n_timepoints).
+            The number of channels must match the number of leads specified in
+            settings.lead_order. By default, expects 12 leads in standard order.
         sfreq: Sampling frequency in Hz
         settings: Configuration for feature extraction. Can be:
             - Settings object: Use directly
             - str or Path: Load from JSON/TOML config file
-            - None: Use default settings
+            - None: Use default settings (12-lead standard order)
 
     Returns:
         DataFrame with shape (n_samples, n_features) containing all extracted features.
         Column names follow pattern: {extractor_name}_{feature_name}_ch{N}
 
     Raises:
-        ValueError: If input data has invalid shape or settings are invalid
+        ValueError: If input data has invalid shape, number of channels doesn't match
+            lead_order, or settings are invalid
         FileNotFoundError: If settings is a path that doesn't exist
         ValidationError: If config file doesn't match schema
 
     Examples:
-        # Use default settings
+        # Use default settings (12-lead standard order)
         features = pte_ecg.get_features(ecg_data, sfreq=1000)
 
-        # Use Settings object
+        # Use Settings object with custom lead order
         settings = pte_ecg.Settings()
+        settings.lead_order = ["I", "II", "III", "aVR", "aVL", "aVF"]  # Only limb leads
         settings.features.morphological.features = ["st_elevation", "qtc_interval"]
-        settings.features.fft.enabled = False
         features = pte_ecg.get_features(ecg_data, sfreq=1000, settings=settings)
 
         # Load from config file

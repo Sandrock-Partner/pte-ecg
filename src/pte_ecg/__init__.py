@@ -7,7 +7,7 @@ multi-channel ECG data and supports parallel processing for efficient computatio
 
 from ._logging import logger, set_log_file, set_log_level
 from .config import ConfigLoader, ExtractorConfig, FeaturesConfig, Settings
-from .core import FeatureExtractor
+from .core import FeatureExtractor, get_features
 from .feature_extractors.registry import ExtractorRegistry
 from .preprocessing import (
     BandpassArgs,
