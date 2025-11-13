@@ -73,7 +73,7 @@ def test_get_features_invalid_input():
 
     # Test with invalid settings type
     with pytest.raises(TypeError):
-        pte_ecg.get_features(np.random.randn(5, 1, 1000), sfreq=360, settings=1)
+        pte_ecg.get_features(np.random.randn(5, 1, 1000), sfreq=360, settings=1)  # ty: ignore[invalid-argument-type]
 
     # Test with invalid settings value
     with pytest.raises(ValueError):

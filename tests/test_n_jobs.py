@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Test script to verify improved n_jobs handling in _get_n_processes function."""
+"""Test script to verify improved n_jobs handling in get_n_processes function."""
 
 import os
 import sys
 
 sys.path.insert(0, "src")
 
-from pte_ecg.features import _get_n_processes
+from pte_ecg.feature_extractors.utils import get_n_processes
 
 
 def test_n_jobs_handling():
-    """Test that _get_n_processes handles all n_jobs values correctly."""
+    """Test that get_n_processes handles all n_jobs values correctly."""
 
     # Get actual CPU count for testing
     if sys.version_info >= (3, 13):
@@ -36,20 +36,14 @@ def test_n_jobs_handling():
     print("\n=== Testing n_jobs handling ===")
 
     for n_jobs, n_tasks, description in test_cases:
-        result = _get_n_processes(n_jobs, n_tasks)
+        result = get_n_processes(n_jobs, n_tasks)
         n_jobs_str = str(n_jobs) if n_jobs is not None else "None"
-        print(
-            f"n_jobs={n_jobs_str:>4}, n_tasks={n_tasks:>2} -> {result:>2} processes | {description}"
-        )
+        print(f"n_jobs={n_jobs_str:>4}, n_tasks={n_tasks:>2} -> {result:>2} processes | {description}")
 
         # Basic validation
         assert result >= 1, f"Result should be at least 1, got {result}"
-        assert result <= n_tasks, (
-            f"Result should not exceed n_tasks={n_tasks}, got {result}"
-        )
-        assert result <= total_cpus, (
-            f"Result should not exceed total_cpus={total_cpus}, got {result}"
-        )
+        assert result <= n_tasks, f"Result should not exceed n_tasks={n_tasks}, got {result}"
+        assert result <= total_cpus, f"Result should not exceed total_cpus={total_cpus}, got {result}"
 
     print("\n[SUCCESS] All n_jobs handling tests passed!")
 
@@ -60,17 +54,17 @@ def test_edge_cases():
     print("\n=== Testing edge cases ===")
 
     # Test with very small n_tasks
-    result = _get_n_processes(-1, 1)
+    result = get_n_processes(-1, 1)
     assert result == 1, f"With n_tasks=1, should return 1, got {result}"
     print(f"n_tasks=1: {result} processes [PASS]")
 
     # Test with n_tasks=0 (edge case)
-    result = _get_n_processes(-1, 0)
+    result = get_n_processes(-1, 0)
     assert result == 1, f"With n_tasks=0, should return 0, got {result}"
     print(f"n_tasks=0: {result} processes [PASS]")
 
     # Test large positive n_jobs
-    result = _get_n_processes(1000, 5)
+    result = get_n_processes(1000, 5)
     assert result == 5, f"Large n_jobs should be capped by n_tasks, got {result}"
     print(f"Large n_jobs capped by n_tasks: {result} processes [PASS]")
 

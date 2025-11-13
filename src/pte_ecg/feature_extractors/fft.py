@@ -93,7 +93,7 @@ class FFTExtractor(BaseFeatureExtractor):
 
         Returns:
             DataFrame with shape (n_samples, n_features) containing FFT features.
-            Column names follow pattern: fft_{feature_name}_ch{N}
+            Column names follow pattern: fft_{feature_name}_{lead_name}
 
         Raises:
             ValueError: If ecg does not have 3 dimensions
@@ -246,9 +246,9 @@ class FFTExtractor(BaseFeatureExtractor):
         # Reshape to (samples, channels × features)
         features_reshaped = features_stacked.reshape(n_samples, -1)
 
-        # Create column names
+        # Create column names using lead names
         column_names = [
-            f"fft_{name}_ch{ch}"
+            f"fft_{name}_{self.lead_order[ch]}"
             for ch in range(n_channels)
             for name in feature_names_ordered
         ]

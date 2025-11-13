@@ -2,13 +2,13 @@
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from ._logging import logger
 from .config import ConfigLoader, ExtractorConfig, Settings
 from .feature_extractors.base import FeatureExtractorProtocol
 from .preprocessing import preprocess
+from .types import ECGData
 
 
 class FeatureExtractor:
@@ -73,10 +73,7 @@ class FeatureExtractor:
 
             # Get extractor class from registry and initialize
             extractor_class = registry.get(extractor_name)
-            selected_features = None if extractor_config.features == "all" else extractor_config.features
-            extractors[extractor_name] = extractor_class(
-                selected_features=selected_features, n_jobs=extractor_config.n_jobs
-            )
+            extractors[extractor_name] = extractor_class(settings=self.settings)
             logger.info(
                 f"Initialized {extractor_name} extractor with "
                 f"{len(extractors[extractor_name].selected_features)} features"
@@ -90,7 +87,7 @@ class FeatureExtractor:
 
     def extract_features(
         self,
-        ecg: np.ndarray,
+        ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
         sfreq: float,
     ) -> pd.DataFrame:
         """Extract features from ECG data.
@@ -101,28 +98,28 @@ class FeatureExtractor:
         3. Concatenates results into a single DataFrame
 
         Args:
-            ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
+            ecg: ECG data with shape (n_ecgs, n_channels, n_timepoints)
             sfreq: Sampling frequency in Hz
 
         Returns:
-            DataFrame with shape (n_samples, n_features) containing all extracted features.
-            Column names follow pattern: {extractor_name}_{feature_name}_ch{N}
+            DataFrame with shape (n_ecgs, n_features) containing all extracted features.
+            Column names follow pattern: {extractor_name}_{feature_name}_{lead_name}
 
         Raises:
             ValueError: If input data has invalid shape or no extractors are enabled
 
         Examples:
             extractor = FeatureExtractor()
-            ecg_data = np.random.randn(10, 12, 10000)  # 10 samples, 12 leads, 10s at 1kHz
+            ecg_data = np.random.randn(10, 12, 10000)  # 10 ECGs, 12 leads, 10s at 1kHz
             features = extractor.extract_features(ecg_data, sfreq=1000)
         """
         # Validate input shape
         if ecg.ndim != 3:
             raise ValueError(
-                f"ECG data must have 3 dimensions (n_samples, n_channels, n_timepoints), got shape {ecg.shape}"
+                f"ECG data must have 3 dimensions (n_ecgs, n_channels, n_timepoints), got shape {ecg.shape}"
             )
 
-        n_samples, n_channels, n_timepoints = ecg.shape
+        n_ecgs, n_channels, n_times = ecg.shape
 
         # Validate that number of channels matches the lead_order
         expected_n_channels = len(self.settings.lead_order)
@@ -134,8 +131,8 @@ class FeatureExtractor:
             )
 
         logger.info(
-            f"Extracting features from {n_samples} samples with {n_channels} channels "
-            f"(leads: {self.settings.lead_order}) and {n_timepoints} timepoints at {sfreq} Hz"
+            f"Extracting features from {n_ecgs} ECGs with {n_channels} channels "
+            f"(leads: {self.settings.lead_order}) and {n_times} timepoints at {sfreq} Hz"
         )
 
         # Apply preprocessing
@@ -160,13 +157,13 @@ class FeatureExtractor:
         else:
             result = pd.concat(feature_dfs, axis=1)
 
-        logger.info(f"Feature extraction complete. Total features: {result.shape[1]} from {result.shape[0]} samples")
+        logger.info(f"Feature extraction complete. Total features: {result.shape[1]} from {result.shape[0]} ECGs")
 
         return result
 
 
 def get_features(
-    ecg: np.ndarray,
+    ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
     sfreq: float,
     settings: Settings | str | Path | None = None,
 ) -> pd.DataFrame:
@@ -176,7 +173,7 @@ def get_features(
     configuration loading and orchestrates the complete feature extraction pipeline.
 
     Args:
-        ecg: ECG data with shape (n_samples, n_channels, n_timepoints).
+        ecg: ECG data with shape (n_ecgs, n_channels, n_timepoints).
             The number of channels must match the number of leads specified in
             settings.lead_order. By default, expects 12 leads in standard order.
         sfreq: Sampling frequency in Hz
@@ -186,8 +183,8 @@ def get_features(
             - None: Use default settings (12-lead standard order)
 
     Returns:
-        DataFrame with shape (n_samples, n_features) containing all extracted features.
-        Column names follow pattern: {extractor_name}_{feature_name}_ch{N}
+        DataFrame with shape (n_ecgs, n_features) containing all extracted features.
+        Column names follow pattern: {extractor_name}_{feature_name}_{lead_name}
 
     Raises:
         ValueError: If input data has invalid shape, number of channels doesn't match

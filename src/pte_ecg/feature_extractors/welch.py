@@ -82,7 +82,7 @@ class WelchExtractor(BaseFeatureExtractor):
 
         Returns:
             DataFrame with shape (n_samples, n_features) containing Welch features.
-            Column names follow pattern: welch_{feature_name}_ch{N}
+            Column names follow pattern: welch_{feature_name}_{lead_name}
 
         Raises:
             ValueError: If ecg does not have 3 dimensions
@@ -199,9 +199,9 @@ class WelchExtractor(BaseFeatureExtractor):
             n_samples, n_channels * len(feature_names_ordered)
         )
 
-        # Create column names
+        # Create column names using lead names
         column_names = [
-            f"welch_{name}_ch{ch}"
+            f"welch_{name}_{self.lead_order[ch]}"
             for ch in range(n_channels)
             for name in feature_names_ordered
         ]

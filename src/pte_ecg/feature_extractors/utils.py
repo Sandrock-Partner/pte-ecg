@@ -7,6 +7,7 @@ including CPU management, logging helpers, and input validation.
 import os
 import sys
 import time
+import warnings
 
 import numpy as np
 
@@ -27,6 +28,14 @@ def assert_3_dims(ecg_data: np.ndarray) -> None:
     """
     if ecg_data.ndim != 3:
         raise ValueError("ECG data must be 3D (n_samples, n_channels, n_timepoints)")
+    if ecg_data.shape[0] == 0:
+        raise ValueError("ECG data must have at least one sample")
+    if ecg_data.shape[1] == 0:
+        raise ValueError("ECG data must have at least one channel")
+    if ecg_data.shape[2] == 0:
+        raise ValueError("ECG data must have at least one timepoint")
+    if ecg_data.shape[2] <= ecg_data.shape[1]:
+        warnings.warn("ECG data seems to have more channels than timepoints. Got shape: {ecg_data.shape}.")
 
 
 def get_n_processes(n_jobs: int | None, n_tasks: int) -> int:
@@ -91,9 +100,7 @@ def log_start(feature_name: str, n_samples: int) -> float:
     Returns:
         Current time.
     """
-    logger.info(
-        "Starting %s feature extraction for %s samples...", feature_name, n_samples
-    )
+    logger.info("Starting %s feature extraction for %s samples", feature_name, n_samples)
     return time.time()
 
 

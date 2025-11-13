@@ -20,6 +20,7 @@ from scipy import signal
 from scipy.signal import resample
 
 from ._logging import logger
+from .types import ECGData
 
 
 class ResampleArgs(pydantic.BaseModel):
@@ -99,8 +100,10 @@ class PreprocessingSettings(pydantic.BaseModel):
 
 
 def preprocess(
-    ecg: np.ndarray, sfreq: float, preprocessing: PreprocessingSettings
-) -> tuple[np.ndarray, float]:
+    ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
+    sfreq: float,
+    preprocessing: PreprocessingSettings,
+) -> tuple[ECGData, float]:  # Returns: (processed_ecg, new_sfreq)
     """Apply preprocessing steps to ECG data.
 
     This function applies the following preprocessing steps in order:
@@ -110,7 +113,7 @@ def preprocess(
     4. Normalization (if enabled)
 
     Args:
-        ecg: Input ECG data with shape (n_samples, n_channels, n_timepoints).
+        ecg: Input ECG data with shape (n_ecgs, n_channels, n_timepoints).
         sfreq: Sampling frequency of the input data in Hz.
         preprocessing: Preprocessing settings.
 
@@ -129,12 +132,12 @@ def preprocess(
 
     if not isinstance(ecg, np.ndarray) or ecg.ndim != 3:
         raise ValueError(
-            "ECG data must be a 3D numpy array with shape (n_samples, n_channels, n_timepoints)"
+            "ECG data must be a 3D numpy array with shape (n_ecgs, n_channels, n_timepoints)"
         )
 
     if ecg.shape[-1] < ecg.shape[-2]:
         warnings.warn(
-            "ECG data must be a 3D numpy array with shape (n_samples, n_channels, n_timepoints)."
+            "ECG data must be a 3D numpy array with shape (n_ecgs, n_channels, n_timepoints)."
             f"ECG data may have more channels than timepoints. Got shape: {ecg.shape}. Reshaping data."
         )
         ecg = ecg.transpose(0, 2, 1)
@@ -145,24 +148,24 @@ def preprocess(
 
     ecg = _check_flats(ecg, drop_flat_recs=True)
 
-    n_samples, n_channels, n_timepoints = ecg.shape
+    n_ecgs, n_channels, n_times = ecg.shape
     logger.info(
-        f"Starting preprocessing of {n_samples} samples with {n_channels} channels "
-        f"and {n_timepoints} timepoints at {sfreq} Hz"
+        f"Starting preprocessing of {n_ecgs} ECGs with {n_channels} channels "
+        f"and {n_times} timepoints at {sfreq} Hz"
     )
     sfreq_new = sfreq
     if preprocessing.resample.enabled and preprocessing.resample.sfreq_new is not None:
         sfreq_new = preprocessing.resample.sfreq_new
         logger.info(f"Resampling from {sfreq} Hz to {sfreq_new} Hz")
-        # Calculate new number of samples
-        new_n_timepoints = int(n_timepoints * sfreq_new / sfreq)
-        # Resample each sample and channel
-        ecg_resampled = np.zeros((n_samples, n_channels, new_n_timepoints))
-        for i in range(n_samples):
+        # Calculate new number of timepoints
+        new_n_times = int(n_times * sfreq_new / sfreq)
+        # Resample each ECG and channel
+        ecg_resampled = np.zeros((n_ecgs, n_channels, new_n_times))
+        for i in range(n_ecgs):
             for j in range(n_channels):
-                ecg_resampled[i, j, :] = resample(ecg[i, j, :], new_n_timepoints)
+                ecg_resampled[i, j, :] = resample(ecg[i, j, :], new_n_times)
         ecg = ecg_resampled
-        n_timepoints = new_n_timepoints
+        n_times = new_n_times
 
     if preprocessing.bandpass.enabled:
         # Apply bandpass filter using scipy
@@ -187,8 +190,8 @@ def preprocess(
                 high = h_freq / nyquist
                 b, a = signal.butter(4, high, btype="low")
 
-            # Apply filter to each sample and channel
-            for i in range(n_samples):
+            # Apply filter to each ECG and channel
+            for i in range(n_ecgs):
                 for j in range(n_channels):
                     ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
     if preprocessing.notch.enabled and preprocessing.notch.freq is not None:
@@ -202,11 +205,11 @@ def preprocess(
         high = (freq + 1) / nyquist
         b, a = signal.butter(4, [low, high], btype="bandstop")
 
-        # Apply filter to each sample and channel
-        for i in range(n_samples):
+        # Apply filter to each ECG and channel
+        for i in range(n_ecgs):
             for j in range(n_channels):
                 ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
-    ecg = ecg.reshape(n_samples, -1)
+    ecg = ecg.reshape(n_ecgs, -1)
     if preprocessing.normalize.enabled:
         # Apply normalization using custom implementation
         mode = preprocessing.normalize.mode
@@ -248,11 +251,11 @@ def preprocess(
             std_log = np.std(log_ratio, axis=-1, keepdims=True)
             std_log = np.where(std_log == 0, 1, std_log)  # Avoid division by zero
             ecg = (log_ratio - mean_log) / std_log
-    ecg = ecg.reshape(n_samples, n_channels, n_timepoints)
+    ecg = ecg.reshape(n_ecgs, n_channels, n_times)
     return ecg, sfreq_new
 
 
-def _check_flats(ecg: np.ndarray, drop_flat_recs: bool) -> np.ndarray:
+def _check_flats(ecg: ECGData, drop_flat_recs: bool) -> ECGData:
     are_flat_chs = np.all(np.isclose(ecg, ecg[..., 0:1]), axis=-1)
     n_flats = np.sum(are_flat_chs)
     if n_flats == ecg.shape[0] * ecg.shape[1]:

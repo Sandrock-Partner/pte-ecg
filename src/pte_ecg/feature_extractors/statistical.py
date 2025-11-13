@@ -74,7 +74,7 @@ class StatisticalExtractor(BaseFeatureExtractor):
 
         Returns:
             DataFrame with shape (n_samples, n_features) containing statistical features.
-            Column names follow pattern: statistical_{feature_name}_ch{N}
+            Column names follow pattern: statistical_{feature_name}_{lead_name}
 
         Raises:
             ValueError: If ecg does not have 3 dimensions
@@ -146,9 +146,9 @@ class StatisticalExtractor(BaseFeatureExtractor):
         # Reshape to (samples, channels × features)
         features_reshaped = features_stacked.reshape(n_samples, -1)
 
-        # Create column names
+        # Create column names using lead names
         column_names = [
-            f"statistical_{name}_ch{ch}"
+            f"statistical_{name}_{self.lead_order[ch]}"
             for ch in range(n_channels)
             for name in feature_names_ordered
         ]

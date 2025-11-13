@@ -5,6 +5,9 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 
+from ..config.models import Settings
+from ..types import ECGData
+
 
 @runtime_checkable
 class FeatureExtractorProtocol(Protocol):
@@ -24,21 +27,18 @@ class FeatureExtractorProtocol(Protocol):
 
     def get_features(
         self,
-        ecg: np.ndarray,
+        ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
         sfreq: float,
-        selected_features: list[str] | None = None,
     ) -> pd.DataFrame:
         """Extract features from ECG data.
 
         Args:
-            ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
+            ecg: ECG data with shape (n_ecgs, n_channels, n_timepoints)
             sfreq: Sampling frequency in Hz
-            selected_features: List of features to extract. If None, extract all
-                available features.
 
         Returns:
-            DataFrame with shape (n_samples, n_features) containing extracted features.
-            Column names follow the pattern: {extractor_name}_{feature_name}_ch{N}
+            DataFrame with shape (n_ecgs, n_features) containing extracted features.
+            Column names follow the pattern: {extractor_name}_{feature_name}_{lead_name}
         """
         ...
 
@@ -53,10 +53,12 @@ class BaseFeatureExtractor:
     - get_features() method implementation
 
     Args:
-        selected_features: List of features to extract. If None, all available
-            features will be extracted. Must be a subset of available_features.
-        n_jobs: Number of parallel jobs for extractors that support parallelization.
-            -1 means use all CPUs, positive values specify exact count.
+        settings: Complete settings object containing configuration for the extractor.
+            Extractors can access:
+            - settings.lead_order: List of lead names
+            - settings.features.{extractor_name}.features: Selected features (or "all")
+            - settings.features.{extractor_name}.n_jobs: Number of parallel jobs
+            - Any other settings they need
 
     Raises:
         ValueError: If selected_features contains features not in available_features
@@ -65,11 +67,23 @@ class BaseFeatureExtractor:
     name: str = ""
     available_features: list[str] = []
 
-    def __init__(
-        self, selected_features: list[str] | None = None, n_jobs: int = -1
-    ) -> None:
-        self.n_jobs = n_jobs
-        self.selected_features = selected_features or self.available_features.copy()
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.lead_order = settings.lead_order
+        
+        # Get extractor-specific config
+        extractor_config = getattr(settings.features, self.name, None)
+        if extractor_config is None:
+            # Fallback for extractors not in settings
+            self.n_jobs = -1
+            self.selected_features = self.available_features.copy()
+        else:
+            self.n_jobs = extractor_config.n_jobs
+            if extractor_config.features == "all":
+                self.selected_features = self.available_features.copy()
+            else:
+                self.selected_features = extractor_config.features
+        
         self._validate_features()
 
     def _validate_features(self) -> None:

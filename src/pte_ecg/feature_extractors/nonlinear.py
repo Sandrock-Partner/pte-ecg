@@ -37,8 +37,9 @@ except ImportError:
 
 # Module-level helper function for multiprocessing
 def _starmap_helper_nonlinear(args: tuple) -> dict:
-    """Helper to unpack args for _process_single_sample in multiprocessing."""
-    return NonlinearExtractor._process_single_sample_static(*args)
+    """Helper function for multiprocessing nonlinear feature extraction."""
+    sample_data, sfreq, lead_order = args
+    return NonlinearExtractor._process_single_sample_static(sample_data, sfreq, lead_order)
 
 
 class NonlinearExtractor(BaseFeatureExtractor):
@@ -132,7 +133,7 @@ class NonlinearExtractor(BaseFeatureExtractor):
 
         Returns:
             DataFrame with shape (n_samples, n_features) containing nonlinear features.
-            Column names follow pattern: nonlinear_{feature_name}_ch{N}
+            Column names follow pattern: nonlinear_{feature_name}_{lead_name}
 
         Raises:
             ValueError: If ecg does not have 3 dimensions
@@ -149,13 +150,13 @@ class NonlinearExtractor(BaseFeatureExtractor):
 
         start = utils.log_start("Nonlinear", ecg.shape[0])
         n_samples = ecg.shape[0]
-        args_list = [(ecg_single, sfreq) for ecg_single in ecg]
+        args_list = [(ecg_single, sfreq, self.lead_order) for ecg_single in ecg]
         processes = utils.get_n_processes(self.n_jobs, n_samples)
 
         if processes == 1:
             results = list(
                 tqdm(
-                    (self._process_single_sample(sample_data, sfreq) for sample_data, sfreq in args_list),
+                    (self._process_single_sample(sample_data, sfreq, self.lead_order) for sample_data, sfreq, self.lead_order in args_list),
                     total=n_samples,
                     desc="Nonlinear features",
                     unit="sample",
@@ -179,45 +180,49 @@ class NonlinearExtractor(BaseFeatureExtractor):
         return feature_df
 
     def _process_single_sample(
-        self, sample_data: np.ndarray, sfreq: float
+        self, sample_data: np.ndarray, sfreq: float, lead_order: list[str]
     ) -> dict[str, float]:
         """Extract nonlinear features from a single sample (all channels).
 
         Args:
             sample_data: Single sample ECG data with shape (n_channels, n_timepoints)
             sfreq: Sampling frequency in Hz
+            lead_order: List of lead names in the same order as channels in sample_data
 
         Returns:
-            Dictionary with keys: nonlinear_{feature}_ch{N}
+            Dictionary with keys: nonlinear_{feature}_{lead_name}
         """
         features: dict[str, float] = {}
         for ch_num, ch_data in enumerate(sample_data):
             ch_feat = self._process_single_channel(ch_data, sfreq, ch_num)
+            lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
             features.update(
-                (f"nonlinear_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
+                (f"nonlinear_{key}_{lead_name}", value) for key, value in ch_feat.items()
             )
         return features
 
     @staticmethod
     def _process_single_sample_static(
-        sample_data: np.ndarray, sfreq: float
+        sample_data: np.ndarray, sfreq: float, lead_order: list[str]
     ) -> dict[str, float]:
         """Static version for multiprocessing compatibility.
 
         Args:
             sample_data: Single sample ECG data with shape (n_channels, n_timepoints)
             sfreq: Sampling frequency in Hz
+            lead_order: List of lead names in the same order as channels in sample_data
 
         Returns:
-            Dictionary with keys: nonlinear_{feature}_ch{N}
+            Dictionary with keys: nonlinear_{feature}_{lead_name}
         """
         features: dict[str, float] = {}
         for ch_num, ch_data in enumerate(sample_data):
             ch_feat = NonlinearExtractor._process_single_channel_static(
                 ch_data, sfreq, ch_num
             )
+            lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
             features.update(
-                (f"nonlinear_{key}_ch{ch_num}", value) for key, value in ch_feat.items()
+                (f"nonlinear_{key}_{lead_name}", value) for key, value in ch_feat.items()
             )
         return features
 

@@ -81,7 +81,7 @@ def main():
 
     print(f"Loaded ECG data: shape={ecg_data_all.shape}, sfreq={sfreq} Hz")
 
-    n_patients = 1000
+    n_patients = 20
     output_dir = pathlib.Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
