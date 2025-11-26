@@ -37,7 +37,9 @@ print("-" * 80)
 try:
     settings = pte_ecg.Settings()
     settings.preprocessing.enabled = False
-    settings.features.fft.features = ["sum_freq", "mean_freq", "dominant_frequency"]
+    # Enable multiple extractors (morphological enabled by default)
+    settings.features.fft = {"enabled": True}
+    settings.features.statistical = {"enabled": True}
 
     features = pte_ecg.get_features(ecg_data, sfreq, settings=settings)
     print(f"[OK] Success! Extracted {features.shape[1]} features from {features.shape[0]} samples")

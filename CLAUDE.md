@@ -214,7 +214,8 @@ Configuration uses Pydantic models with nested structure:
 settings = pte_ecg.Settings()
 settings.preprocessing.bandpass.enabled = True
 settings.preprocessing.bandpass.l_freq = 0.5
-settings.features.morphological.enabled = True
+# Feature extractors are configured as dicts (morphological enabled by default)
+settings.features.statistical = {"enabled": True}  # Enable additional extractor
 ```
 
 Use `"default"` string for default settings.
@@ -411,13 +412,12 @@ import pte_ecg
 ecg_data = np.random.randn(12, 10000)  # 12 leads, 10 seconds at 1000 Hz
 sfreq = 1000
 
-# Configure features
+# Configure features (morphological enabled by default)
 settings = pte_ecg.Settings()
 settings.preprocessing.bandpass.enabled = True
 settings.preprocessing.bandpass.l_freq = 0.5
 settings.preprocessing.bandpass.h_freq = 40
-settings.features.morphological.enabled = True
-settings.features.fft.enabled = True
+settings.features.fft = {"enabled": True}  # Enable additional extractor
 
 # Extract features
 features_df = pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)

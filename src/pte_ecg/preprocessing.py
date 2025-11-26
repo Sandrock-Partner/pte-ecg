@@ -76,9 +76,7 @@ class NormalizeArgs(pydantic.BaseModel):
     """
 
     enabled: bool = False
-    mode: Literal["mean", "ratio", "logratio", "percent", "zscore", "zlogratio"] = (
-        "zscore"
-    )
+    mode: Literal["mean", "ratio", "logratio", "percent", "zscore", "zlogratio"] = "zscore"
 
 
 class PreprocessingSettings(pydantic.BaseModel):
@@ -131,9 +129,7 @@ def preprocess(
         raise ValueError(f"Sampling frequency must be positive, got {sfreq}")
 
     if not isinstance(ecg, np.ndarray) or ecg.ndim != 3:
-        raise ValueError(
-            "ECG data must be a 3D numpy array with shape (n_ecgs, n_channels, n_timepoints)"
-        )
+        raise ValueError("ECG data must be a 3D numpy array with shape (n_ecgs, n_channels, n_timepoints)")
 
     if ecg.shape[-1] < ecg.shape[-2]:
         warnings.warn(
@@ -150,8 +146,7 @@ def preprocess(
 
     n_ecgs, n_channels, n_times = ecg.shape
     logger.info(
-        f"Starting preprocessing of {n_ecgs} ECGs with {n_channels} channels "
-        f"and {n_times} timepoints at {sfreq} Hz"
+        f"Starting preprocessing of {n_ecgs} ECGs with {n_channels} channels and {n_times} timepoints at {sfreq} Hz"
     )
     sfreq_new = sfreq
     if preprocessing.resample.enabled and preprocessing.resample.sfreq_new is not None:
@@ -225,9 +220,7 @@ def preprocess(
         elif mode == "logratio":
             # Log of ratio
             mean_vals = np.mean(ecg, axis=-1, keepdims=True)
-            mean_vals = np.where(
-                mean_vals <= 0, 1e-10, mean_vals
-            )  # Avoid log of zero/negative
+            mean_vals = np.where(mean_vals <= 0, 1e-10, mean_vals)  # Avoid log of zero/negative
             ecg = np.log(ecg / mean_vals)
         elif mode == "percent":
             # Scale to percentage of mean
@@ -243,9 +236,7 @@ def preprocess(
         elif mode == "zlogratio":
             # Z-score of log ratio
             mean_vals = np.mean(ecg, axis=-1, keepdims=True)
-            mean_vals = np.where(
-                mean_vals <= 0, 1e-10, mean_vals
-            )  # Avoid log of zero/negative
+            mean_vals = np.where(mean_vals <= 0, 1e-10, mean_vals)  # Avoid log of zero/negative
             log_ratio = np.log(ecg / mean_vals)
             mean_log = np.mean(log_ratio, axis=-1, keepdims=True)
             std_log = np.std(log_ratio, axis=-1, keepdims=True)
@@ -259,13 +250,10 @@ def _check_flats(ecg: ECGData, drop_flat_recs: bool) -> ECGData:
     are_flat_chs = np.all(np.isclose(ecg, ecg[..., 0:1]), axis=-1)
     n_flats = np.sum(are_flat_chs)
     if n_flats == ecg.shape[0] * ecg.shape[1]:
-        raise ValueError(
-            f"All channels of all recordings are flat lines ({n_flats}). Check your data"
-        )
+        raise ValueError(f"All channels of all recordings are flat lines ({n_flats}). Check your data")
     if n_flats > 0:
-        logger.warning(
-            f"{n_flats} channels of {ecg.shape[0]} recordings are flat lines."
-        )
+        have_flat_chs = np.any(are_flat_chs, axis=-1)
+        logger.warning(f"{n_flats} channels in {have_flat_chs.sum()}/{ecg.shape[0]} recordings are flat lines.")
     are_empty_recordings = np.all(are_flat_chs, axis=-1)
     n_empty_recordings = np.sum(are_empty_recordings)
     empty_recordings = np.where(are_empty_recordings)[0]

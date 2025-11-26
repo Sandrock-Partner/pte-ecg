@@ -1,9 +1,12 @@
 """Welch's method power spectral density feature extractor."""
 
+from typing import Literal
+
 import numpy as np
 import pandas as pd
 import scipy.signal
 
+from ..core import FeatureExtractor
 from .base import BaseFeatureExtractor
 
 # Small constant for numerical stability
@@ -69,11 +72,11 @@ class WelchExtractor(BaseFeatureExtractor):
         "peak_frequency",
     ]
 
-    def get_features(
-        self,
-        ecg: np.ndarray,
-        sfreq: float,
-    ) -> pd.DataFrame:
+    def __init__(self, parent: FeatureExtractor, selected_features: list[str] | Literal["all"] = "all"):
+        self.parent = parent
+        self.selected_features = selected_features if selected_features != "all" else self.available_features
+
+    def get_features(self, ecg: np.ndarray) -> pd.DataFrame:
         """Extract Welch features from ECG data.
 
         Args:
@@ -89,8 +92,7 @@ class WelchExtractor(BaseFeatureExtractor):
         """
         if ecg.ndim != 3:
             raise ValueError(
-                f"ECG data must have 3 dimensions (n_samples, n_channels, n_timepoints), "
-                f"got shape {ecg.shape}"
+                f"ECG data must have 3 dimensions (n_samples, n_channels, n_timepoints), got shape {ecg.shape}"
             )
 
         n_samples, n_channels, n_timepoints = ecg.shape
@@ -103,8 +105,8 @@ class WelchExtractor(BaseFeatureExtractor):
         for channel_data in flat_data:
             freqs, pxx = scipy.signal.welch(
                 channel_data,
-                fs=sfreq,
-                nperseg=int(sfreq),
+                fs=self.sfreq,
+                nperseg=int(self.sfreq),
                 scaling="density",
             )
             psd_list.append(pxx)
@@ -117,16 +119,12 @@ class WelchExtractor(BaseFeatureExtractor):
 
         # Dynamic bins (split frequency range into 10 equal parts)
         n_bins = 10
-        bin_features_needed = any(
-            self._should_extract_feature(f"bin_{i}") for i in range(n_bins)
-        )
+        bin_features_needed = any(self._should_extract_feature(f"bin_{i}") for i in range(n_bins))
 
         if bin_features_needed:
             bins = np.zeros((psd_array.shape[0], n_bins))
             bin_freqs = []
-            for i, bin_idx in enumerate(
-                np.array_split(np.arange(psd_array.shape[1]), n_bins)
-            ):
+            for i, bin_idx in enumerate(np.array_split(np.arange(psd_array.shape[1]), n_bins)):
                 bins[:, i] = np.mean(psd_array[:, bin_idx], axis=1)
                 bin_freqs.append((freqs[bin_idx[0]], freqs[bin_idx[-1]]))
 
@@ -147,9 +145,7 @@ class WelchExtractor(BaseFeatureExtractor):
         if self._should_extract_feature("log_power_ratio"):
             low_power = np.sum(psd_array[:, mask_low], axis=1)
             high_power = np.sum(psd_array[:, mask_high], axis=1)
-            feature_dict["log_power_ratio"] = np.log(
-                high_power / (low_power + EPS) + EPS
-            )
+            feature_dict["log_power_ratio"] = np.log(high_power / (low_power + EPS) + EPS)
 
         # Frequency bands
         if self._should_extract_feature("band_0_0_5"):
@@ -175,9 +171,7 @@ class WelchExtractor(BaseFeatureExtractor):
             if total_power is None:
                 total_power = np.sum(psd_array, axis=1)
             psd_norm = psd_array / (total_power[:, None] + EPS)
-            feature_dict["spectral_entropy"] = -np.sum(
-                psd_norm * np.log2(psd_norm + EPS), axis=1
-            )
+            feature_dict["spectral_entropy"] = -np.sum(psd_norm * np.log2(psd_norm + EPS), axis=1)
 
         if self._should_extract_feature("peak_frequency"):
             peak_indices = np.argmax(psd_array, axis=1)
@@ -195,15 +189,11 @@ class WelchExtractor(BaseFeatureExtractor):
         features_stacked = np.column_stack(feature_list)
 
         # Reshape to (samples, channels * features)
-        features_reshaped = features_stacked.reshape(
-            n_samples, n_channels * len(feature_names_ordered)
-        )
+        features_reshaped = features_stacked.reshape(n_samples, n_channels * len(feature_names_ordered))
 
         # Create column names using lead names
         column_names = [
-            f"welch_{name}_{self.lead_order[ch]}"
-            for ch in range(n_channels)
-            for name in feature_names_ordered
+            f"welch_{name}_{self.lead_order[ch]}" for ch in range(n_channels) for name in feature_names_ordered
         ]
 
         return pd.DataFrame(features_reshaped, columns=column_names)

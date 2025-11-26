@@ -41,15 +41,15 @@ for name, extractor_name, is_required in extractors_to_test:
         settings = pte_ecg.Settings()
 
         # Disable all extractors first
-        settings.features.fft.enabled = False
-        settings.features.statistical.enabled = False
-        settings.features.welch.enabled = False
-        settings.features.morphological.enabled = False
-        settings.features.nonlinear.enabled = False
-        settings.features.waveshape.enabled = False
+        settings.features.fft = {"enabled": False}
+        settings.features.statistical = {"enabled": False}
+        settings.features.welch = {"enabled": False}
+        settings.features.morphological = {"enabled": False}
+        settings.features.nonlinear = {"enabled": False}
+        settings.features.waveshape = {"enabled": False}
 
         # Enable only the one we're testing
-        setattr(getattr(settings.features, extractor_name), "enabled", True)
+        setattr(settings.features, extractor_name, {"enabled": True})
 
         # Disable preprocessing for faster testing
         settings.preprocessing.enabled = False
@@ -79,12 +79,10 @@ print("-" * 80)
 try:
     settings = pte_ecg.Settings()
     # Enable core extractors (skip optional ones)
-    settings.features.fft.enabled = True
-    settings.features.statistical.enabled = True
-    settings.features.welch.enabled = True
-    settings.features.morphological.enabled = True
-    settings.features.nonlinear.enabled = False
-    settings.features.waveshape.enabled = False
+    settings.features.fft = {"enabled": True}
+    settings.features.statistical = {"enabled": True}
+    settings.features.welch = {"enabled": True}
+    settings.features.morphological = {"enabled": True}
     settings.preprocessing.enabled = False
 
     features = pte_ecg.get_features(ecg_data, sfreq, settings=settings)

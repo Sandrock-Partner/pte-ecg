@@ -128,13 +128,12 @@ settings.preprocessing.notch.freq = 50  # Remove 50 Hz powerline noise
 settings.preprocessing.normalize.enabled = True
 settings.preprocessing.normalize.mode = "zscore"
 
-# Enable/disable specific extractors
-settings.features.fft.enabled = True
-settings.features.statistical.enabled = True
-settings.features.welch.enabled = True
-settings.features.morphological.enabled = True
-settings.features.nonlinear.enabled = False  # Disable optional extractors
-settings.features.waveshape.enabled = False
+# Enable/disable specific extractors (morphological is enabled by default)
+settings.features.fft = {"enabled": True}
+settings.features.statistical = {"enabled": True}
+settings.features.welch = {"enabled": True}
+# settings.features.nonlinear = {"enabled": True}  # Enable optional extractors
+# settings.features.waveshape = {"enabled": True}
 
 # Extract features
 features = pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)

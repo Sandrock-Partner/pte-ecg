@@ -39,12 +39,10 @@ for name, extractor_name in extractors_to_test:
 
         # Disable all extractors
         for ex in ["fft", "statistical", "welch", "morphological", "nonlinear", "waveshape"]:
-            getattr(settings.features, ex).enabled = False
+            setattr(settings.features, ex, {"enabled": False})
 
-        # Enable only the one we're testing
-        extractor_config = getattr(settings.features, extractor_name)
-        extractor_config.enabled = True
-        extractor_config.n_jobs = 1  # Disable multiprocessing
+        # Enable only the one we're testing (with n_jobs=1 to disable multiprocessing)
+        setattr(settings.features, extractor_name, {"enabled": True, "n_jobs": 1})
 
         settings.preprocessing.enabled = False
 
@@ -65,13 +63,10 @@ print("Test: All Core Extractors Together (n_jobs=1)")
 print("-" * 80)
 try:
     settings = pte_ecg.Settings()
-    settings.features.fft.enabled = True
-    settings.features.statistical.enabled = True
-    settings.features.welch.enabled = True
-    settings.features.morphological.enabled = True
-    settings.features.morphological.n_jobs = 1  # Disable multiprocessing
-    settings.features.nonlinear.enabled = False
-    settings.features.waveshape.enabled = False
+    settings.features.fft = {"enabled": True}
+    settings.features.statistical = {"enabled": True}
+    settings.features.welch = {"enabled": True}
+    settings.features.morphological = {"enabled": True, "n_jobs": 1}  # Disable multiprocessing
     settings.preprocessing.enabled = False
 
     features = pte_ecg.get_features(ecg_data, sfreq, settings=settings)

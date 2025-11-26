@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pte_ecg.config.models import Settings
+from pte_ecg.core import FeatureExtractor
 from pte_ecg.feature_extractors.fft import FFTExtractor
 from pte_ecg.feature_extractors.morphological import MorphologicalExtractor
 from pte_ecg.feature_extractors.statistical import StatisticalExtractor
@@ -31,9 +33,9 @@ class TestFFTExtractor:
     def test_basic_extraction(self, test_data: tuple[np.ndarray, int]):
         """Test basic FFT feature extraction."""
         ecg_data, sfreq = test_data
-        extractor = FFTExtractor()
+        extractor = FFTExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         assert isinstance(features, pd.DataFrame)
         assert features.shape[0] == ecg_data.shape[0]  # Same number of samples
@@ -43,9 +45,9 @@ class TestFFTExtractor:
     def test_single_channel(self, single_channel_data: tuple[np.ndarray, int]):
         """Test FFT extraction with single channel."""
         ecg_data, sfreq = single_channel_data
-        extractor = FFTExtractor()
+        extractor = FFTExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         assert isinstance(features, pd.DataFrame)
         assert features.shape[0] == ecg_data.shape[0]
@@ -54,23 +56,23 @@ class TestFFTExtractor:
 
     def test_invalid_dimensions(self):
         """Test FFT extractor with invalid input dimensions."""
-        extractor = FFTExtractor()
+        extractor = FFTExtractor(parent=FeatureExtractor(sfreq=100, settings=Settings()))
 
         # 2D input should raise ValueError
         with pytest.raises(ValueError, match="must have 3 dimensions"):
-            extractor.get_features(np.random.randn(10, 100), sfreq=100)
+            extractor.get_features(np.random.randn(10, 100))
 
         # 1D input should raise ValueError
         with pytest.raises(ValueError, match="must have 3 dimensions"):
-            extractor.get_features(np.random.randn(100), sfreq=100)
+            extractor.get_features(np.random.randn(100))
 
     def test_feature_consistency(self, test_data: tuple[np.ndarray, int]):
         """Test that FFT features are consistent across runs."""
         ecg_data, sfreq = test_data
-        extractor = FFTExtractor()
+        extractor = FFTExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features1 = extractor.get_features(ecg_data, sfreq)
-        features2 = extractor.get_features(ecg_data, sfreq)
+        features1 = extractor.get_features(ecg_data)
+        features2 = extractor.get_features(ecg_data)
 
         pd.testing.assert_frame_equal(features1, features2)
 
@@ -81,9 +83,9 @@ class TestStatisticalExtractor:
     def test_basic_extraction(self, test_data: tuple[np.ndarray, int]):
         """Test basic statistical feature extraction."""
         ecg_data, sfreq = test_data
-        extractor = StatisticalExtractor()
+        extractor = StatisticalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         assert isinstance(features, pd.DataFrame)
         assert features.shape[0] == ecg_data.shape[0]
@@ -93,9 +95,9 @@ class TestStatisticalExtractor:
     def test_expected_features(self, test_data: tuple[np.ndarray, int]):
         """Test that expected statistical features are present."""
         ecg_data, sfreq = test_data
-        extractor = StatisticalExtractor()
+        extractor = StatisticalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         # Check for common statistical features (they include channel suffix)
         expected_prefixes = ["statistical_mean_ch", "statistical_var_ch", "statistical_median_ch"]
@@ -105,9 +107,9 @@ class TestStatisticalExtractor:
     def test_no_nan_values(self, test_data: tuple[np.ndarray, int]):
         """Test that statistical features don't contain NaN values for valid data."""
         ecg_data, sfreq = test_data
-        extractor = StatisticalExtractor()
+        extractor = StatisticalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         # Statistical features should not have NaN for valid data
         assert not features.isnull().any().any()
@@ -119,9 +121,9 @@ class TestWelchExtractor:
     def test_basic_extraction(self, test_data: tuple[np.ndarray, int]):
         """Test basic Welch feature extraction."""
         ecg_data, sfreq = test_data
-        extractor = WelchExtractor()
+        extractor = WelchExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         assert isinstance(features, pd.DataFrame)
         assert features.shape[0] == ecg_data.shape[0]
@@ -131,9 +133,9 @@ class TestWelchExtractor:
     def test_frequency_bins(self, test_data: tuple[np.ndarray, int]):
         """Test that Welch extractor creates expected frequency bins."""
         ecg_data, sfreq = test_data
-        extractor = WelchExtractor()
+        extractor = WelchExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         # Should have bin features
         bin_cols = [col for col in features.columns if "welch_bin_" in col]
@@ -143,11 +145,11 @@ class TestWelchExtractor:
         """Test Welch extractor with different sampling frequencies."""
         n_samples, n_channels, n_timepoints = 2, 3, 500
         ecg_data = np.random.randn(n_samples, n_channels, n_timepoints)
-        extractor = WelchExtractor()
+        extractor = WelchExtractor(parent=FeatureExtractor(sfreq=100, settings=Settings()))
 
         # Test with different sampling frequencies
         for sfreq in [100, 250, 500]:
-            features = extractor.get_features(ecg_data, sfreq)
+            features = extractor.get_features(ecg_data)
             assert isinstance(features, pd.DataFrame)
             assert features.shape[0] == n_samples
 
@@ -158,9 +160,9 @@ class TestMorphologicalExtractor:
     def test_basic_extraction(self, test_data: tuple[np.ndarray, int]):
         """Test basic morphological feature extraction."""
         ecg_data, sfreq = test_data
-        extractor = MorphologicalExtractor()
+        extractor = MorphologicalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         assert isinstance(features, pd.DataFrame)
         assert features.shape[0] == ecg_data.shape[0]
@@ -170,9 +172,9 @@ class TestMorphologicalExtractor:
     def test_expected_morphological_features(self, test_data: tuple[np.ndarray, int]):
         """Test that expected morphological features are present."""
         ecg_data, sfreq = test_data
-        extractor = MorphologicalExtractor()
+        extractor = MorphologicalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         # Check for common morphological features (they include channel suffix)
         expected_features = [
@@ -189,10 +191,9 @@ class TestMorphologicalExtractor:
         # Create flat signal
         n_samples, n_channels, n_timepoints = 1, 2, 500
         ecg_data = np.zeros((n_samples, n_channels, n_timepoints))
-        sfreq = 100
 
-        extractor = MorphologicalExtractor()
-        features = extractor.get_features(ecg_data, sfreq)
+        extractor = MorphologicalExtractor(parent=FeatureExtractor(sfreq=100, settings=Settings()))
+        features = extractor.get_features(ecg_data)
 
         # Should return DataFrame even with flat signal
         assert isinstance(features, pd.DataFrame)
@@ -203,12 +204,12 @@ class TestMorphologicalExtractor:
         ecg_data, sfreq = test_data
 
         # Test with single process
-        extractor_single = MorphologicalExtractor(n_jobs=1)
-        features_single = extractor_single.get_features(ecg_data, sfreq)
+        extractor_single = MorphologicalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()), n_jobs=1)
+        features_single = extractor_single.get_features(ecg_data)
 
         # Test with multiple processes
-        extractor_multi = MorphologicalExtractor(n_jobs=2)
-        features_multi = extractor_multi.get_features(ecg_data, sfreq)
+        extractor_multi = MorphologicalExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()), n_jobs=2)
+        features_multi = extractor_multi.get_features(ecg_data)
 
         # Results should have same shape
         assert features_single.shape == features_multi.shape
@@ -221,9 +222,9 @@ class TestNonlinearExtractor:
     def test_basic_extraction(self, test_data: tuple[np.ndarray, int]):
         """Test basic nonlinear feature extraction."""
         ecg_data, sfreq = test_data
-        extractor = NonlinearExtractor()
+        extractor = NonlinearExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         assert isinstance(features, pd.DataFrame)
         assert features.shape[0] == ecg_data.shape[0]
@@ -233,9 +234,9 @@ class TestNonlinearExtractor:
     def test_expected_nonlinear_features(self, test_data: tuple[np.ndarray, int]):
         """Test that expected nonlinear features are present."""
         ecg_data, sfreq = test_data
-        extractor = NonlinearExtractor()
+        extractor = NonlinearExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()))
 
-        features = extractor.get_features(ecg_data, sfreq)
+        features = extractor.get_features(ecg_data)
 
         # Check for common nonlinear features
         expected_features = [
@@ -251,12 +252,12 @@ class TestNonlinearExtractor:
         ecg_data, sfreq = test_data
 
         # Test with single process
-        extractor_single = NonlinearExtractor(n_jobs=1)
-        features_single = extractor_single.get_features(ecg_data, sfreq)
+        extractor_single = NonlinearExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()), n_jobs=1)
+        features_single = extractor_single.get_features(ecg_data)
 
         # Test with multiple processes
-        extractor_multi = NonlinearExtractor(n_jobs=2)
-        features_multi = extractor_multi.get_features(ecg_data, sfreq)
+        extractor_multi = NonlinearExtractor(parent=FeatureExtractor(sfreq=sfreq, settings=Settings()), n_jobs=2)
+        features_multi = extractor_multi.get_features(ecg_data)
 
         # Results should have same shape
         assert features_single.shape == features_multi.shape
@@ -283,11 +284,11 @@ class TestWaveShapeExtractor:
 
         monkeypatch.setattr(ws_module, "HAS_PYBISPECTRA", False)
 
-        extractor = WaveShapeExtractor()
+        extractor = WaveShapeExtractor(parent=FeatureExtractor(sfreq=100, settings=Settings()))
         ecg_data = np.random.randn(1, 2, 500)
 
         with pytest.raises(ImportError, match="pybispectra is required"):
-            extractor.get_features(ecg_data, sfreq=100)
+            extractor.get_features(ecg_data)
 
 
 class TestExtractorRegistry:

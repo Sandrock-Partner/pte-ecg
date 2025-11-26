@@ -4,9 +4,12 @@ This extractor performs comprehensive waveform analysis including peak detection
 interval calculations, ST segment analysis, and territory-specific markers.
 """
 
+from __future__ import annotations
+
+import math
 import multiprocessing
 import warnings
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import neurokit2 as nk
 import numpy as np
@@ -18,6 +21,21 @@ from tqdm import tqdm
 from .._logging import logger
 from . import utils
 from .base import BaseFeatureExtractor
+
+if TYPE_CHECKING:
+    from ..core import FeatureExtractor
+
+
+def _safe_nanmean(values: list | np.ndarray) -> float:
+    """Compute nanmean only if at least one non-NaN value exists.
+
+    This avoids RuntimeWarning: Mean of empty slice when all values are NaN.
+    """
+    arr = np.asarray(values)
+    if np.all(np.isnan(arr)):
+        return np.nan
+    return float(np.nanmean(arr))
+
 
 # Peak detection methods to try (in order of preference)
 _METHODS_FINDPEAKS = [
@@ -55,20 +73,19 @@ PeakMethod = Literal[
     "promac",
 ]
 
-# Interval pairs for comprehensive statistics (wave1, wave2, feature_name)
 _INTERVAL_PAIRS = [
-    ("P", "R", "pr_interval"),
-    ("P", "Q", "pq_interval"),
-    ("Q", "R", "qr_interval"),
-    ("Q", "S", "qrs_duration"),
-    ("R", "S", "rs_interval"),
-    ("S", "T_onset", "st_duration"),
-    ("Q", "T", "qt_interval"),
-    ("R", "T_onset", "rt_duration"),
-    ("R", "T", "rt_interval"),
-    ("P", "T", "pt_interval"),
-    ("P_onset", "P_offset", "p_duration"),
-    ("T_onset", "T_offset", "t_duration"),
+    ("P", "R", "pr_interval", 80, 300),  # PR interval: typically 120-200ms
+    ("P", "Q", "pq_interval", 80, 300),  # PQ interval: similar to PR
+    ("Q", "R", "qr_interval", 5, 100),  # Part of QRS: typically <40ms
+    ("Q", "S", "qrs_duration", 40, 200),  # QRS duration: typically 60-100ms
+    ("R", "S", "rs_interval", 15, 100),  # Part of QRS: typically 40-60ms
+    ("S", "T_onset", "st_duration", 40, 200),  # ST segment: typically 80-120ms
+    ("Q", "T", "qt_interval", 200, 600),  # QT interval: typically 300-450ms (HR dependent)
+    ("R", "T_onset", "rt_duration", 100, 400),  # R to T onset: typically 200-300ms
+    ("R", "T", "rt_interval", 150, 500),  # R to T peak: typically 250-350ms
+    ("P", "T", "pt_interval", 200, 1000),  # P to T: entire cycle minus TP segment
+    ("P_onset", "P_offset", "p_duration", 40, 150),  # P wave duration: typically 80-120ms
+    ("T_onset", "T_offset", "t_duration", 50, 250),  # T wave duration: typically 100-200ms
 ]
 
 
@@ -78,11 +95,11 @@ class ECGDelineationError(Exception):
     pass
 
 
-# Module-level helper for multiprocessing
+# Module-level helper for multiprocessing (must be at module level for pickling)
 def _starmap_helper_morph(args: tuple) -> dict:
     """Helper function for multiprocessing morphological feature extraction."""
-    sample_data, sfreq, lead_order = args
-    return MorphologicalExtractor._process_single_sample_static(sample_data, sfreq, lead_order)
+    extractor, sample_data, sfreq = args
+    return extractor._process_single_sample(sample_data, sfreq)
 
 
 class MorphologicalExtractor(BaseFeatureExtractor):
@@ -105,16 +122,18 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         - Amplitudes: p_amplitude, q_amplitude, r_amplitude, etc.
         - Areas: p_area, t_area
         - Slopes: r_slope, t_slope
-        - ST segment: st_elevation, st_depression, j_point_elevation, st_slope
-        - T-wave: t_wave_inversion_depth, t_symmetry
+        - ST segment: st_level, st_slope
+        - T-wave: t_inversion_depth, t_symmetry
         - RR intervals: rr_interval_mean, rr_interval_std, etc.
         - Advanced: qrs_fragmentation, q_wave_width, pathological_q, qtc_bazett, qtc_fridericia, qt_rr_ratio, etc.
         - Global (12-lead): qrs_axis, p_axis, territory markers
-        - Early MI markers: aVL_T_inversion, terminal_qrs_distortion, precordial_t_wave_imbalance
+        - Early MI markers: aVL_t_inversion, precordial_t_imbalance
 
     Args:
         selected_features: List of features to extract (not yet implemented for filtering)
         n_jobs: Number of parallel jobs
+        use_global_peaks: Whether to use global peak detection (detect peaks on one best channel
+            and use for all channels) instead of per-channel detection. Priority: II, -aVR, aVF, I, aVL, III.
 
     Examples:
         # Extract all morphological features
@@ -123,6 +142,20 @@ class MorphologicalExtractor(BaseFeatureExtractor):
     """
 
     name = "morphological"
+
+    # Class-level configuration (can be overridden in subclasses or settings)
+    use_global_peaks: bool = False
+
+    def __init__(self, parent: FeatureExtractor, n_jobs: int = -1, use_global_peaks: bool = False):
+        """Initialize the morphological extractor.
+
+        Args:
+            parent: Parent FeatureExtractor instance for accessing sfreq, lead_order, etc.
+            **kwargs: Additional config parameters (features, n_jobs, etc.)
+        """
+        self.parent = parent
+        self.n_jobs = n_jobs
+        self.use_global_peaks = use_global_peaks
 
     available_features = [
         # Interval means
@@ -164,54 +197,35 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         "rt_duration_std",
         "rt_interval_std",
         "pt_interval_std",
-        # Interval minimums
-        "qrs_duration_min",
-        "qt_interval_min",
-        "pq_interval_min",
-        "pr_interval_min",
-        "qr_interval_min",
-        "rs_interval_min",
-        "p_duration_min",
-        "t_duration_min",
-        "st_duration_min",
-        "rt_duration_min",
-        "rt_interval_min",
-        "pt_interval_min",
-        # Interval maximums
-        "qrs_duration_max",
-        "qt_interval_max",
-        "pq_interval_max",
-        "pr_interval_max",
-        "qr_interval_max",
-        "rs_interval_max",
-        "p_duration_max",
-        "t_duration_max",
-        "st_duration_max",
-        "rt_duration_max",
-        "rt_interval_max",
-        "pt_interval_max",
-        # Amplitudes
-        "p_amplitude",
-        "q_amplitude",
-        "r_amplitude",
-        "s_amplitude",
-        "t_amplitude",
+        # Amplitudes (mean)
+        "p_amplitude_mean",
+        "q_amplitude_mean",
+        "r_amplitude_mean",
+        "s_amplitude_mean",
+        "t_amplitude_mean",
+        "j_amplitude_mean",
+        # Amplitudes (std)
+        "p_amplitude_std",
+        "q_amplitude_std",
+        "r_amplitude_std",
+        "s_amplitude_std",
+        "t_amplitude_std",
+        "j_amplitude_std",
+        # Ratios
+        "q_to_r_ratio",
         # Areas and slopes
         "p_area",
         "t_area",
         "r_slope",
         "t_slope",
         # ST segment
-        "st_elevation",
-        "st_depression",
-        "j_point_elevation",
+        "st_level",
+        "st_area",
         "st_slope",
         "st60_amplitude",
         "st80_amplitude",
-        "st_area",
-        "early_repolarization",
         # T-wave analysis
-        "t_wave_inversion_depth",
+        "t_inversion_depth",
         "t_symmetry",
         "biphasic_t",
         "tpeak_tend_interval",
@@ -222,81 +236,77 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         "rr_interval_iqr",
         "rr_interval_skewness",
         "rr_interval_kurtosis",
-        "sd1",
-        "sd2",
-        "sd1_sd2_ratio",
+        "rr_interval_sd1",
+        "rr_interval_sd2",
+        "rr_interval_sd1_sd2_ratio",
         # Advanced
         "qrs_fragmentation",
         "pathological_q",
-        "q_wave_width",
-        "pathological_q_width",
+        "q_width",
+        "q_width_pathological",
         "qt_rr_ratio",
         "pr_rr_ratio",
         "t_qt_ratio",
+        "t_r_ratio",
         "qtc_bazett",
         "qtc_fridericia",
         # Multi-lead (global features)
         "qrs_axis",
         "p_axis",
-        "r_wave_progression",
+        "r_progression",
         # Territory-specific (12-lead only)
         # Septal (V1-V2)
-        "V1_V2_ST_elevation",
+        "V1_V2_st_level",
+        "V1_V2_j_amplitude",
+        "V1_V2_t_r_ratio",
+        "V1_V2_hyperacute_t",
+        "V1_V2_t_inversion",
         # Anterior (V3-V4)
-        "V3_V4_ST_elevation",
+        "V3_V4_st_level",
+        "V3_V4_j_amplitude",
+        "V3_V4_t_r_ratio",
+        "V3_V4_hyperacute_t",
+        "V3_V4_t_inversion",
         # Anteroseptal (V1-V4)
-        "V1_V3_ST_elevation",
-        "V1_V4_ST_elevation",
-        "V1_V4_T_inversion",
-        "V1_Q_amplitude",
-        "V1_Q_to_R_ratio",
+        "V1_V4_st_level",
+        "V1_V4_j_amplitude",
+        "V1_V4_t_r_ratio",
+        "V1_V4_hyperacute_t",
+        "V1_V4_t_inversion",
         # Inferior (II, III, aVF)
-        "II_III_aVF_ST_elevation",
-        "II_III_aVF_ST_depression",
-        "II_III_aVF_T_inversion",
-        "III_vs_II_ST_elevation_ratio",
-        "III_Q_amplitude",
-        "III_Q_to_R_ratio",
+        "II_III_aVF_st_level",
+        "II_III_aVF_j_amplitude",
+        "II_III_aVF_t_r_ratio",
+        "II_III_aVF_hyperacute_t",
+        "II_III_aVF_t_inversion",
+        "III_II_st_level_ratio",
         # Lateral (I, aVL, V5, V6)
-        "I_aVL_V5_V6_ST_elevation",
-        "I_aVL_V5_V6_T_inversion",
-        "I_aVL_ST_depression",
-        "V5_Q_amplitude",
-        "V5_Q_to_R_ratio",
-        "V6_Q_amplitude",
-        "V6_Q_to_R_ratio",
+        "I_aVL_V5_V6_st_level",
+        "I_aVL_V5_V6_j_amplitude",
+        "I_aVL_V5_V6_t_r_ratio",
+        "I_aVL_V5_V6_hyperacute_t",
+        "I_aVL_V5_V6_t_inversion",
+        # Even more specific territory features
+        # Right Ventricular (V1 to V2 ratio)
+        "V1_V2_st_level_ratio",
         # Posterior (reciprocal in V1-V3)
-        "V1_V3_ST_depression",
-        "V1_V3_R_wave_amplitude",
-        # Right Ventricular (V1, V2)
-        "V1_ST_elevation",
-        "V2_ST_depression",
-        "V1_V2_ST_elevation_depression_ratio",
+        "V1_V3_r_amplitude",
         # Phase 1: Early MI Markers
-        "aVL_T_inversion",
-        "terminal_qrs_distortion",
-        "V2_terminal_qrs_distortion",
-        "V3_terminal_qrs_distortion",
-        "precordial_t_wave_balance_cv",
-        "precordial_t_wave_imbalance",
-        "precordial_t_wave_max_min_ratio",
-        "precordial_t_wave_imbalance_ratio",
-        # Add T wave per region
-        # Überhöhte T Wellen (hyperakute t-welle)
-        # Präterminal negative T-Welle
-        # Biphasische T-Welle (v.a. V2-V3, Wellens-Zeichen)
+        "aVL_t_inversion",
+        "precordial_t_balance_cv",
+        "precordial_t_imbalance",
+        "precordial_t_max_min_ratio",
+        "precordial_t_imbalance_ratio",
+        # T wave morphological features
+        "preterminal_negative_t",
+        "wellens_sign_v2_v3",
     ]
 
-    def get_features(
-        self,
-        ecg: np.ndarray,
-        sfreq: float,
-    ) -> pd.DataFrame:
+    def get_features(self, ecg: np.ndarray) -> pd.DataFrame:
         """Extract morphological features from ECG data.
 
         Args:
             ecg: ECG data with shape (n_samples, n_channels, n_timepoints)
-            sfreq: Sampling frequency in Hz
 
         Returns:
             DataFrame with shape (n_samples, n_features) containing morphological features.
@@ -310,16 +320,12 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         start = utils.log_start("Morphological", ecg.shape[0])
         n_samples = ecg.shape[0]
-        args_list = [(ecg_single, sfreq, self.lead_order) for ecg_single in ecg]
         processes = utils.get_n_processes(self.n_jobs, n_samples)
 
         if processes == 1:
             results = list(
                 tqdm(
-                    (
-                        self._process_single_sample(sample_data, sfreq, self.lead_order)
-                        for sample_data, sfreq, self.lead_order in args_list
-                    ),
+                    (self._process_single_sample(ecg_single) for ecg_single in ecg),
                     total=n_samples,
                     desc="Morphological features",
                     unit="sample",
@@ -331,7 +337,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             with multiprocessing.Pool(processes=processes) as pool:
                 results = list(
                     tqdm(
-                        pool.imap_unordered(_starmap_helper_morph, args_list),
+                        pool.imap_unordered(self._process_single_sample, ecg),
                         total=n_samples,
                         desc="Morphological features",
                         unit="sample",
@@ -342,43 +348,61 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         utils.log_end("Morphological", start, feature_df.shape)
         return feature_df
 
-    def _process_single_sample(self, sample_data: np.ndarray, sfreq: float, lead_order: list[str]) -> dict[str, float]:
+    def _process_single_sample(self, sample_data: np.ndarray) -> dict[str, float]:
         """Extract morphological features from a single sample (all channels).
 
         Args:
             sample_data: Single sample ECG data with shape (n_channels, n_timepoints)
-            sfreq: Sampling frequency in Hz
-            lead_order: List of lead names in the same order as channels in sample_data
-
-        Returns:
-            Dictionary with keys: morphological_{feature}_{lead_name} (per-channel)
-                               and morphological_{feature} (global features)
-        """
-        return self._process_single_sample_static(sample_data, sfreq, lead_order)
-
-    @staticmethod
-    def _process_single_sample_static(sample_data: np.ndarray, sfreq: float, lead_order: list[str]) -> dict[str, float]:
-        """Static version for multiprocessing compatibility.
-
-        Args:
-            sample_data: Single sample ECG data with shape (n_channels, n_timepoints)
-            sfreq: Sampling frequency in Hz
-            lead_order: List of lead names in the same order as channels in sample_data
 
         Returns:
             Dictionary with keys: morphological_{feature}_{lead_name} and morphological_{feature}
         """
+        lead_order = self.lead_order
         features: dict[str, float] = {}
         flat_chs = np.all(np.isclose(sample_data, sample_data[:, 0:1]), axis=1)
         if np.all(flat_chs):
             logger.warning("All channels are flat lines. Skipping morphological features.")
             return features
-        for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs)):
+
+        global_r_peaks = None
+        if self.use_global_peaks:
+            # Priority: II, -aVR, aVF, I, aVL, III
+            detection_priority = ["II", "aVR", "aVF", "I", "aVL", "III"]
+            for lead_name in detection_priority:
+                if lead_name not in lead_order:
+                    continue
+
+                ch_idx = lead_order.index(lead_name)
+                # Check bounds and flat line
+                if ch_idx >= len(flat_chs) or flat_chs[ch_idx]:
+                    continue
+
+                ch_data = sample_data[ch_idx]
+
+                # Invert aVR for detection as the main deflection is negative
+                if lead_name == "aVR":
+                    detection_data = -ch_data
+                else:
+                    detection_data = ch_data
+
+                r_peaks, n_peaks, _ = MorphologicalExtractor._detect_r_peaks(detection_data, self.sfreq)
+
+                if n_peaks > 1 and r_peaks is not None:
+                    global_r_peaks = r_peaks
+                    logger.debug(f"Using global R-peaks detected from lead {lead_name} ({n_peaks} peaks)")
+                    break
+
+            if global_r_peaks is None:
+                logger.warning(
+                    "Global peak detection failed on all priority leads. Falling back to per-channel detection."
+                )
+
+        for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs, strict=True)):
             if is_flat:
                 lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
                 logger.warning(f"Channel {ch_num} ({lead_name}) is a flat line. Skipping morphological features.")
                 continue
-            ch_feat = MorphologicalExtractor._process_single_channel_static(ch_data, sfreq)
+            ch_feat = MorphologicalExtractor._process_single_channel(ch_data, self.sfreq, r_peaks=global_r_peaks)
             lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
             features.update((f"morphological_{key}_{lead_name}", value) for key, value in ch_feat.items())
 
@@ -390,8 +414,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if lead_i_idx is not None and lead_avf_idx is not None:
             lead_i_name = lead_order[lead_i_idx]
             lead_avf_name = lead_order[lead_avf_idx]
-            r_amp_lead_i = features.get(f"morphological_r_amplitude_{lead_i_name}")
-            r_amp_lead_avf = features.get(f"morphological_r_amplitude_{lead_avf_name}")
+            r_amp_lead_i = features.get(f"morphological_r_amplitude_mean_{lead_i_name}")
+            r_amp_lead_avf = features.get(f"morphological_r_amplitude_mean_{lead_avf_name}")
             if r_amp_lead_i is not None and r_amp_lead_avf is not None and (r_amp_lead_i != 0 or r_amp_lead_avf != 0):
                 features["morphological_qrs_axis"] = float(np.arctan2(r_amp_lead_avf, r_amp_lead_i) * 180 / np.pi)
 
@@ -399,8 +423,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if lead_i_idx is not None and lead_avf_idx is not None:
             lead_i_name = lead_order[lead_i_idx]
             lead_avf_name = lead_order[lead_avf_idx]
-            p_amp_lead_i = features.get(f"morphological_p_amplitude_{lead_i_name}")
-            p_amp_lead_avf = features.get(f"morphological_p_amplitude_{lead_avf_name}")
+            p_amp_lead_i = features.get(f"morphological_p_amplitude_mean_{lead_i_name}")
+            p_amp_lead_avf = features.get(f"morphological_p_amplitude_mean_{lead_avf_name}")
             if p_amp_lead_i is not None and p_amp_lead_avf is not None and (p_amp_lead_i != 0 or p_amp_lead_avf != 0):
                 features["morphological_p_axis"] = float(np.arctan2(p_amp_lead_avf, p_amp_lead_i) * 180 / np.pi)
 
@@ -410,197 +434,91 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         # ====================================================================
         v1_v2_lead_names = [lead for lead in ["V1", "V2"] if lead in lead_order]
         if len(v1_v2_lead_names) >= 2:
-            v1_v2_st_elev = np.mean(
-                [features.get(f"morphological_st_elevation_{lead}", 0.0) for lead in v1_v2_lead_names]
-            )
-            features["morphological_V1_V2_ST_elevation"] = float(v1_v2_st_elev)
+            features.update(MorphologicalExtractor._calculate_territory_features("V1_V2", v1_v2_lead_names, features))
 
         # ====================================================================
         # 2. ANTERIOR WALL (LAD Territory - V3-V4)
         # ====================================================================
         v3_v4_lead_names = [lead for lead in ["V3", "V4"] if lead in lead_order]
         if len(v3_v4_lead_names) >= 2:
-            v3_v4_st_elev = np.mean(
-                [features.get(f"morphological_st_elevation_{lead}", 0.0) for lead in v3_v4_lead_names]
-            )
-            features["morphological_V3_V4_ST_elevation"] = float(v3_v4_st_elev)
+            features.update(MorphologicalExtractor._calculate_territory_features("V3_V4", v3_v4_lead_names, features))
 
         # ====================================================================
         # 3. ANTEROSEPTAL WALL (LAD Territory - V1-V4)
         # ====================================================================
-        v1_v3_lead_names = [lead for lead in ["V1", "V2", "V3"] if lead in lead_order]
         v1_v4_lead_names = [lead for lead in ["V1", "V2", "V3", "V4"] if lead in lead_order]
-
-        if len(v1_v3_lead_names) >= 3:
-            v1_v3_st_elev = np.mean(
-                [features.get(f"morphological_st_elevation_{lead}", 0.0) for lead in v1_v3_lead_names]
-            )
-            features["morphological_V1_V3_ST_elevation"] = float(v1_v3_st_elev)
-
         if len(v1_v4_lead_names) >= 4:
-            v1_v4_st_elev = np.mean(
-                [features.get(f"morphological_st_elevation_{lead}", 0.0) for lead in v1_v4_lead_names]
-            )
-            features["morphological_V1_V4_ST_elevation"] = float(v1_v4_st_elev)
-
-            v1_v4_t_inv = np.mean(
-                [features.get(f"morphological_t_wave_inversion_depth_{lead}", 0.0) for lead in v1_v4_lead_names]
-            )
-            features["morphological_V1_V4_T_inversion"] = float(v1_v4_t_inv)
-
-        if "V1" in lead_order:
-            v1_name = "V1"
-            q_v1 = abs(features.get(f"morphological_q_amplitude_{v1_name}", 0.0))
-            r_v1 = features.get(f"morphological_r_amplitude_{v1_name}", 1.0)
-            features["morphological_V1_Q_amplitude"] = float(q_v1)
-            features["morphological_V1_Q_to_R_ratio"] = float(q_v1 / r_v1) if r_v1 > 0 else 0.0
+            features.update(MorphologicalExtractor._calculate_territory_features("V1_V4", v1_v4_lead_names, features))
 
         # ====================================================================
         # 4. INFERIOR WALL (RCA or LCx Territory - II, III, aVF)
         # ====================================================================
         inferior_lead_names = [lead for lead in ["II", "III", "aVF"] if lead in lead_order]
         if len(inferior_lead_names) >= 3:
-            inf_st_elev = np.mean(
-                [features.get(f"morphological_st_elevation_{lead}", 0.0) for lead in inferior_lead_names]
+            features.update(
+                MorphologicalExtractor._calculate_territory_features("II_III_aVF", inferior_lead_names, features)
             )
-            features["morphological_II_III_aVF_ST_elevation"] = float(inf_st_elev)
 
-            inf_t_inv = np.mean(
-                [features.get(f"morphological_t_wave_inversion_depth_{lead}", 0.0) for lead in inferior_lead_names]
-            )
-            features["morphological_II_III_aVF_T_inversion"] = float(inf_t_inv)
-
-            # Differentiate RCA vs LCx: ST elevation III > II suggests RCA
-            if "II" in lead_order and "III" in lead_order:
-                st_ii = features.get("morphological_st_elevation_II", 0.0)
-                st_iii = features.get("morphological_st_elevation_III", 0.0)
-                if st_ii > 0:
-                    features["morphological_III_vs_II_ST_elevation_ratio"] = float(st_iii / st_ii)
-                else:
-                    features["morphological_III_vs_II_ST_elevation_ratio"] = float(st_iii) if st_iii > 0 else 0.0
-
-        if "III" in lead_order:
-            iii_name = "III"
-            q_iii = abs(features.get(f"morphological_q_amplitude_{iii_name}", 0.0))
-            r_iii = features.get(f"morphological_r_amplitude_{iii_name}", 1.0)
-            features["morphological_III_Q_amplitude"] = float(q_iii)
-            features["morphological_III_Q_to_R_ratio"] = float(q_iii / r_iii) if r_iii > 0 else 0.0
+        # Differentiate RCA vs LCx: ST elevation III > II suggests RCA
+        if "II" in lead_order and "III" in lead_order:
+            st_ii = features.get("morphological_st_level_II")
+            st_iii = features.get("morphological_st_level_III")
+            if st_ii is not None and st_iii is not None and st_ii > 0:
+                features["morphological_III_II_st_level_ratio"] = float(st_iii / st_ii)
+            else:
+                features["morphological_III_II_st_level_ratio"] = np.nan
 
         # ====================================================================
         # 5. LATERAL WALL (LCx or Diagonal LAD Territory - I, aVL, V5, V6)
         # ====================================================================
         lateral_lead_names = [lead for lead in ["I", "aVL", "V5", "V6"] if lead in lead_order]
         if len(lateral_lead_names) >= 4:
-            lat_st_elev = np.mean(
-                [features.get(f"morphological_st_elevation_{lead}", 0.0) for lead in lateral_lead_names]
+            features.update(
+                MorphologicalExtractor._calculate_territory_features("I_aVL_V5_V6", lateral_lead_names, features)
             )
-            features["morphological_I_aVL_V5_V6_ST_elevation"] = float(lat_st_elev)
 
-            lat_t_inv = np.mean(
-                [features.get(f"morphological_t_wave_inversion_depth_{lead}", 0.0) for lead in lateral_lead_names]
-            )
-            features["morphological_I_aVL_V5_V6_T_inversion"] = float(lat_t_inv)
-
-        if "V5" in lead_order:
-            v5_name = "V5"
-            q_v5 = abs(features.get(f"morphological_q_amplitude_{v5_name}", 0.0))
-            r_v5 = features.get(f"morphological_r_amplitude_{v5_name}", 1.0)
-            features["morphological_V5_Q_amplitude"] = float(q_v5)
-            features["morphological_V5_Q_to_R_ratio"] = float(q_v5 / r_v5) if r_v5 > 0 else 0.0
-
-        if "V6" in lead_order:
-            v6_name = "V6"
-            q_v6 = abs(features.get(f"morphological_q_amplitude_{v6_name}", 0.0))
-            r_v6 = features.get(f"morphological_r_amplitude_{v6_name}", 1.0)
-            features["morphological_V6_Q_amplitude"] = float(q_v6)
-            features["morphological_V6_Q_to_R_ratio"] = float(q_v6 / r_v6) if r_v6 > 0 else 0.0
+        # Reciprocal ST depression in lateral leads (for inferior MI)
+        i_avl_lead_names = [lead for lead in ["I", "aVL"] if lead in lead_order]
+        if len(i_avl_lead_names) >= 2:
+            i_avl_st_dep_values = [features.get(f"morphological_st_level_{lead}", np.nan) for lead in i_avl_lead_names]
+            features["morphological_I_aVL_st_level"] = _safe_nanmean(i_avl_st_dep_values)
 
         # ====================================================================
         # 6. POSTERIOR WALL (RCA or LCx Territory - reciprocal in V1-V3)
         # ====================================================================
-        # Posterior MI shows ST depression in V1-V3 (reciprocal of posterior ST elevation)
         v1_v3_lead_names_posterior = [lead for lead in ["V1", "V2", "V3"] if lead in lead_order]
         if len(v1_v3_lead_names_posterior) >= 3:
-            v1_v3_st_dep = np.mean(
-                [features.get(f"morphological_st_depression_{lead}", 0.0) for lead in v1_v3_lead_names_posterior]
-            )
-            features["morphological_V1_V3_ST_depression"] = float(v1_v3_st_dep)
-
             # Tall R waves in V1-V3 (suggestive of posterior MI)
             v1_v3_r_amplitudes = []
             for lead in v1_v3_lead_names_posterior:
-                r_amp = features.get(f"morphological_r_amplitude_{lead}")
+                r_amp = features.get(f"morphological_r_amplitude_mean_{lead}")
                 if r_amp is not None:
                     v1_v3_r_amplitudes.append(r_amp)
             if v1_v3_r_amplitudes:
-                features["morphological_V1_V3_R_wave_amplitude"] = float(np.mean(v1_v3_r_amplitudes))
+                features["morphological_V1_V3_r_amplitude"] = float(np.mean(v1_v3_r_amplitudes))
+            else:
+                features["morphological_V1_V3_r_amplitude"] = np.nan
 
         # ====================================================================
         # 7. RIGHT VENTRICULAR (RCA proximal Territory - V1, V4R)
         # ====================================================================
         # RV infarction: ST elevation in V1 with ST depression in V2
         if "V1" in lead_order and "V2" in lead_order:
-            v1_st_elev = features.get("morphological_st_elevation_V1", 0.0)
-            v2_st_dep = features.get("morphological_st_depression_V2", 0.0)
-            features["morphological_V1_ST_elevation"] = float(v1_st_elev)
-            features["morphological_V2_ST_depression"] = float(v2_st_dep)
+            v1_st_elev = features.get("morphological_st_level_V1")
+            v2_st_dep = features.get("morphological_st_level_V2")
             # Ratio for RV infarction pattern
-            if v2_st_dep > 0:
-                features["morphological_V1_V2_ST_elevation_depression_ratio"] = float(v1_st_elev / v2_st_dep)
+            if v1_st_elev is not None and v2_st_dep is not None and v2_st_dep != 0:
+                features["morphological_V1_V2_st_level_ratio"] = float(v1_st_elev / v2_st_dep)
             else:
-                features["morphological_V1_V2_ST_elevation_depression_ratio"] = (
-                    float(v1_st_elev) if v1_st_elev > 0 else 0.0
-                )
-
-        # ====================================================================
-        # RECIPROCAL CHANGES (ST depression in reciprocal leads)
-        # ====================================================================
-        # Reciprocal ST depression in inferior leads (for anterior/septal/anteroseptal MI)
-        if len(inferior_lead_names) >= 3:
-            inf_st_dep = np.mean(
-                [features.get(f"morphological_st_depression_{lead}", 0.0) for lead in inferior_lead_names]
-            )
-            features["morphological_II_III_aVF_ST_depression"] = float(inf_st_dep)
-
-        # Reciprocal ST depression in lateral leads (for inferior MI)
-        i_avl_lead_names = [lead for lead in ["I", "aVL"] if lead in lead_order]
-        if len(i_avl_lead_names) >= 2:
-            i_avl_st_dep = np.mean(
-                [features.get(f"morphological_st_depression_{lead}", 0.0) for lead in i_avl_lead_names]
-            )
-            features["morphological_I_aVL_ST_depression"] = float(i_avl_st_dep)
+                features["morphological_V1_V2_st_level_ratio"] = np.nan
 
         # ====================================================================
         # PHASE 1: EARLY MI MARKERS
         # ====================================================================
         # 1. T-wave inversion in lead aVL (early ACS indicator)
         if "aVL" in lead_order:
-            avl_t_inv = features.get("morphological_t_wave_inversion_depth_aVL", 0.0)
-            features["morphological_aVL_T_inversion"] = float(avl_t_inv)
-
-        # 2. Terminal QRS distortion (absence of S-wave in V2/V3)
-        # Early sign of acute MI, especially LAD occlusion
-        terminal_qrs_distortion_v2 = 0.0
-        terminal_qrs_distortion_v3 = 0.0
-        if "V2" in lead_order:
-            # Check if S-wave is present (S amplitude should be negative and significant)
-            s_amp_v2 = features.get("morphological_s_amplitude_V2")
-            if s_amp_v2 is None or s_amp_v2 >= -0.05:  # No significant S-wave (threshold: -0.05mV)
-                terminal_qrs_distortion_v2 = 1.0
-        if "V3" in lead_order:
-            s_amp_v3 = features.get("morphological_s_amplitude_V3")
-            if s_amp_v3 is None or s_amp_v3 >= -0.05:  # No significant S-wave
-                terminal_qrs_distortion_v3 = 1.0
-
-        if "V2" in lead_order or "V3" in lead_order:
-            # Terminal QRS distortion if either V2 or V3 lacks S-wave
-            features["morphological_terminal_qrs_distortion"] = float(
-                max(terminal_qrs_distortion_v2, terminal_qrs_distortion_v3)
-            )
-            if "V2" in lead_order:
-                features["morphological_V2_terminal_qrs_distortion"] = float(terminal_qrs_distortion_v2)
-            if "V3" in lead_order:
-                features["morphological_V3_terminal_qrs_distortion"] = float(terminal_qrs_distortion_v3)
+            avl_t_inv = features.get("morphological_t_inversion_depth_aVL")
+            features["morphological_aVL_t_inversion"] = float(avl_t_inv) if avl_t_inv is not None else np.nan
 
         # 3. Loss of precordial T-wave balance
         # Disproportionate T-wave amplitude between precordial leads (early ischemia sign)
@@ -608,7 +526,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if len(precordial_leads) >= 3:
             t_amplitudes_precordial = []
             for lead in precordial_leads:
-                t_amp = features.get(f"morphological_t_amplitude_{lead}")
+                t_amp = features.get(f"morphological_t_amplitude_mean_{lead}")
                 if t_amp is not None:
                     t_amplitudes_precordial.append(abs(t_amp))
 
@@ -619,24 +537,23 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 std_t_amp = np.std(t_amplitudes_array)
                 if mean_t_amp > 0:
                     cv_t_balance = std_t_amp / mean_t_amp
-                    features["morphological_precordial_t_wave_balance_cv"] = float(cv_t_balance)
+                    features["morphological_precordial_t_balance_cv"] = float(cv_t_balance)
                     # High CV (>0.5) indicates significant imbalance
-                    features["morphological_precordial_t_wave_imbalance"] = 1.0 if cv_t_balance > 0.5 else 0.0
+                    features["morphological_precordial_t_imbalance"] = 1.0 if cv_t_balance > 0.5 else 0.0
 
                 # Also calculate max/min ratio (another measure of imbalance)
                 if len(t_amplitudes_array) > 1 and np.min(t_amplitudes_array) > 0:
                     max_min_ratio = np.max(t_amplitudes_array) / np.min(t_amplitudes_array)
-                    features["morphological_precordial_t_wave_max_min_ratio"] = float(max_min_ratio)
+                    features["morphological_precordial_t_max_min_ratio"] = float(max_min_ratio)
                     # Ratio > 3 indicates significant imbalance
-                    features["morphological_precordial_t_wave_imbalance_ratio"] = 1.0 if max_min_ratio > 3.0 else 0.0
+                    features["morphological_precordial_t_imbalance_ratio"] = 1.0 if max_min_ratio > 3.0 else 0.0
 
-        # ====================================================================
         # R WAVE PROGRESSION (across precordial leads V1-V6)
-        # ====================================================================
-        # Get R amplitudes in V1-V6 (leads 6-11)
+        # Get R amplitudes in V1-V6
         r_amplitudes = []
-        for lead_idx in range(6, 12):
-            r_amp = features.get(f"morphological_r_amplitude_ch{lead_idx}")
+        precordial_leads = [lead for lead in ["V1", "V2", "V3", "V4", "V5", "V6"] if lead in lead_order]
+        for lead_name in precordial_leads:
+            r_amp = features.get(f"morphological_r_amplitude_mean_{lead_name}")
             if r_amp is not None:
                 r_amplitudes.append(r_amp)
 
@@ -645,38 +562,250 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             # Check if there's normal progression
             progression = np.diff(r_amplitudes[:4])
             progression_score = float(np.mean(progression > 0))  # Proportion of increases
-            features["morphological_r_wave_progression"] = progression_score
+            features["morphological_r_progression"] = progression_score
         else:
-            features["morphological_r_wave_progression"] = np.nan
+            features["morphological_r_progression"] = np.nan
+
+        # ====================================================================
+        # WELLENS SIGN (Biphasic T waves in V2-V3)
+        # ====================================================================
+        # Wellens sign: Biphasic or deeply inverted T waves in V2 and/or V3
+        # Indicative of critical LAD stenosis, typically seen without ST elevation
+        # Criteria: Biphasic T wave (positive then negative) OR deeply inverted T in V2-V3
+        wellens_v2 = 0.0
+        wellens_v3 = 0.0
+        if "V2" in lead_order:
+            biphasic_v2 = features.get("morphological_biphasic_t_V2")
+            t_inv_v2 = features.get("morphological_t_inversion_depth_V2")
+            # Wellens sign: biphasic T OR deeply inverted T (>0.1 mV) in V2
+            if (biphasic_v2 is not None and biphasic_v2 > 0.5) or (t_inv_v2 is not None and t_inv_v2 > 0.1):
+                wellens_v2 = 1.0
+        if "V3" in lead_order:
+            biphasic_v3 = features.get("morphological_biphasic_t_V3")
+            t_inv_v3 = features.get("morphological_t_inversion_depth_V3")
+            # Wellens sign: biphasic T OR deeply inverted T (>0.1 mV) in V3
+            if (biphasic_v3 is not None and biphasic_v3 > 0.5) or (t_inv_v3 is not None and t_inv_v3 > 0.1):
+                wellens_v3 = 1.0
+
+        # Wellens sign is positive if present in V2 OR V3
+        if "V2" in lead_order or "V3" in lead_order:
+            features["morphological_wellens_sign_v2_v3"] = float(max(wellens_v2, wellens_v3))
 
         return features
 
-    def _process_single_channel(self, ch_data: np.ndarray, sfreq: float) -> dict[str, float]:
-        """Extract morphological features from a single channel.
+    @staticmethod
+    def _calculate_territory_features(
+        territory_name: str,
+        lead_names: list[str],
+        features: dict[str, float],
+        feature_types: list[str] | None = None,
+    ) -> dict[str, float]:
+        """Calculate aggregate features for a cardiac territory.
 
         Args:
-            ch_data: Single channel ECG data with shape (n_timepoints,)
-            sfreq: Sampling frequency in Hz
+            territory_name: Name of the territory (e.g., "V1_V2", "II_III_aVF")
+            lead_names: List of lead names in the territory
+            features: Dictionary of per-lead features
+            feature_types: List of feature types to calculate. If None, calculates all.
+                Available: "st_level", "j_amplitude", "t_r_ratio", "hyperacute_t", "t_inversion"
 
         Returns:
-            Dictionary of morphological features
+            Dictionary of territory features with keys like "morphological_{territory_name}_{feature_type}"
         """
-        return self._process_single_channel_static(ch_data, sfreq)
+        if feature_types is None:
+            feature_types = ["st_level", "j_amplitude", "t_r_ratio", "hyperacute_t", "t_inversion"]
+
+        territory_features: dict[str, float] = {}
+
+        # ST level
+        if "st_level" in feature_types:
+            st_values = [features.get(f"morphological_st_level_{lead}", np.nan) for lead in lead_names]
+            territory_features[f"morphological_{territory_name}_st_level"] = _safe_nanmean(st_values)
+
+        # J-point amplitude
+        if "j_amplitude" in feature_types:
+            j_values = [features.get(f"morphological_j_amplitude_mean_{lead}", np.nan) for lead in lead_names]
+            territory_features[f"morphological_{territory_name}_j_amplitude"] = _safe_nanmean(j_values)
+
+        # T/R ratio (mean)
+        if "t_r_ratio" in feature_types:
+            t_r_ratios = [features.get(f"morphological_t_r_ratio_{lead}", np.nan) for lead in lead_names]
+            territory_features[f"morphological_{territory_name}_t_r_ratio"] = _safe_nanmean(t_r_ratios)
+
+        # Hyperacute T (any lead with |T/R| >= 1)
+        if "hyperacute_t" in feature_types:
+            hyperacute = any(
+                abs(features.get(f"morphological_t_r_ratio_{lead}", np.nan)) >= 1.0
+                for lead in lead_names
+                if not np.isnan(features.get(f"morphological_t_r_ratio_{lead}", np.nan))
+            )
+            territory_features[f"morphological_{territory_name}_hyperacute_t"] = 1.0 if hyperacute else 0.0
+
+        # T-wave inversion
+        if "t_inversion" in feature_types:
+            t_inv_values = [features.get(f"morphological_t_inversion_depth_{lead}", np.nan) for lead in lead_names]
+            territory_features[f"morphological_{territory_name}_t_inversion"] = _safe_nanmean(t_inv_values)
+
+        return territory_features
 
     @staticmethod
-    def _process_single_channel_static(ch_data: np.ndarray, sfreq: float) -> dict[str, float]:
+    def _calculate_beatwise_baseline(
+        ch_data: np.ndarray,
+        r_peaks: np.ndarray,
+        p_onsets: np.ndarray | None,
+        p_offsets: np.ndarray | None,
+        t_offsets: np.ndarray | None,
+        sfreq: float,
+        tp_window_ms: float = 80.0,
+        pr_window_ms: float = 80.0,
+        tachycardia_threshold_bpm: float = 100.0,
+    ) -> np.ndarray:
+        """Calculate beat-wise isoelectric baseline from TP or PR segments.
+
+        Returns:
+            Array of baseline values, one per R-peak (NaN if not available)
+        """
+        n_beats = len(r_peaks)
+        baseline_per_beat = np.full(n_beats, np.nan)
+
+        if n_beats == 0:
+            return baseline_per_beat
+
+        is_tachycardic = False
+        if n_beats > 1:
+            rr_intervals = np.diff(r_peaks) / sfreq
+            mean_hr = 60.0 / np.mean(rr_intervals) if np.mean(rr_intervals) > 0 else 0.0
+            is_tachycardic = mean_hr > tachycardia_threshold_bpm
+
+        tp_window_samples = int(tp_window_ms * sfreq / 1000.0)
+        pr_window_samples = int(pr_window_ms * sfreq / 1000.0)
+        margin_before_r = int(50 * sfreq / 1000.0)
+        window_before_r = int(250 * sfreq / 1000.0)
+        window_size = int(80 * sfreq / 1000.0)
+
+        p_onsets_arr = np.asarray(p_onsets) if p_onsets is not None else np.array([])
+        p_offsets_arr = np.asarray(p_offsets) if p_offsets is not None else np.array([])
+        t_offsets_arr = np.asarray(t_offsets) if t_offsets is not None else np.array([])
+
+        for i, r_idx in enumerate(r_peaks):
+            if np.isnan(r_idx):
+                continue
+
+            r_idx = int(r_idx)
+            baseline_value = np.nan
+
+            if is_tachycardic:
+                baseline_value = MorphologicalExtractor._get_tp_baseline(
+                    r_idx, ch_data, p_onsets_arr, t_offsets_arr, tp_window_samples
+                )
+            if np.isnan(baseline_value):
+                baseline_value = MorphologicalExtractor._get_pr_baseline(
+                    r_idx, ch_data, p_offsets_arr, pr_window_samples, margin_before_r
+                )
+            if np.isnan(baseline_value):
+                baseline_value = MorphologicalExtractor._get_r_baseline(r_idx, ch_data, window_before_r, window_size)
+
+            baseline_per_beat[i] = baseline_value
+
+        return baseline_per_beat
+
+    @staticmethod
+    def _get_r_baseline(r_idx: int, ch_data: np.ndarray, window_before_r: int, window_size: int) -> float:
+        seg_start = max(0, r_idx - window_before_r - window_size)
+        seg_end = max(0, r_idx - window_before_r)
+        if seg_end > seg_start and seg_end <= len(ch_data):
+            return float(np.median(ch_data[seg_start:seg_end]))
+        return np.nan
+
+    @staticmethod
+    def _get_pr_baseline(
+        r_idx: int, ch_data: np.ndarray, p_offsets_arr: np.ndarray, pr_window_samples: int, margin_before_r: int
+    ) -> float:
+        if len(p_offsets_arr) == 0:
+            return np.nan
+
+        p_offsets_before_r = p_offsets_arr[p_offsets_arr < r_idx]
+        if len(p_offsets_before_r) == 0:
+            return np.nan
+
+        p_offset = int(p_offsets_before_r[-1])
+        pr_seg_end = max(p_offset + pr_window_samples, r_idx - margin_before_r)
+        pr_seg_start = pr_seg_end - pr_window_samples
+        if pr_seg_start >= p_offset and pr_seg_end <= len(ch_data) and pr_seg_start >= 0:
+            return float(np.median(ch_data[pr_seg_start:pr_seg_end]))
+        return np.nan
+
+    @staticmethod
+    def _get_tp_baseline(
+        r_idx: int, ch_data: np.ndarray, p_onsets_arr: np.ndarray, t_offsets_arr: np.ndarray, tp_window_samples: int
+    ) -> float:
+        if len(t_offsets_arr) == 0 or len(p_onsets_arr) == 0:
+            return np.nan
+
+        t_offsets_before_r = t_offsets_arr[t_offsets_arr < r_idx]
+        if len(t_offsets_before_r) == 0:
+            return np.nan
+
+        t_offset = int(t_offsets_before_r[-1])
+        p_onsets_after_t = p_onsets_arr[(p_onsets_arr > t_offset) & (p_onsets_arr < r_idx)]
+        if len(p_onsets_after_t) == 0:
+            return np.nan
+
+        p_onset = int(p_onsets_after_t[0])
+        tp_seg_duration = p_onset - t_offset
+        if tp_seg_duration < tp_window_samples:
+            return np.nan
+
+        window_start = t_offset + (tp_seg_duration - tp_window_samples) // 2
+        window_end = window_start + tp_window_samples
+        if window_end > len(ch_data) or window_start < 0:
+            return np.nan
+
+        return float(np.median(ch_data[window_start:window_end]))
+
+    @staticmethod
+    def _get_beat_baseline(
+        wave_idx: int,
+        r_peaks: np.ndarray,
+        baseline_per_beat: np.ndarray,
+        fallback_baseline: float,
+    ) -> float:
+        """Get baseline for a specific wave by finding associated R-peak."""
+        associated_r_idx = None
+        for r_idx in r_peaks:
+            if not np.isnan(r_idx) and wave_idx > r_idx:
+                associated_r_idx = int(r_idx)
+
+        if associated_r_idx is not None:
+            r_peak_idx_in_array = np.where(r_peaks == associated_r_idx)[0]
+            if len(r_peak_idx_in_array) > 0 and not np.isnan(baseline_per_beat[r_peak_idx_in_array[0]]):
+                return float(baseline_per_beat[r_peak_idx_in_array[0]])
+
+        return fallback_baseline
+
+    @staticmethod
+    def _process_single_channel(
+        ch_data: np.ndarray,
+        sfreq: float,
+        r_peaks: np.ndarray | None = None,
+    ) -> dict[str, float]:
         """Static method for processing a single channel (multiprocessing compatible).
 
         Args:
             ch_data: Single channel ECG data with shape (n_timepoints,)
             sfreq: Sampling frequency in Hz
+            r_peaks: Optional pre-detected R-peaks. If None, peaks are detected from ch_data.
 
         Returns:
             Dictionary of morphological features
         """
         features: dict[str, float] = {}
-        r_peaks, n_r_peaks, r_peak_method = MorphologicalExtractor._detect_r_peaks(ch_data, sfreq)
-        if not n_r_peaks:
+        if r_peaks is None:
+            r_peaks, n_r_peaks, _ = MorphologicalExtractor._detect_r_peaks(ch_data, sfreq)
+        else:
+            n_r_peaks = len(r_peaks)
+
+        if not n_r_peaks or r_peaks is None:
             logger.warning("No R-peaks detected. Skipping morphological features.")
             return {}
         waves_dict: dict = {}
@@ -741,11 +870,21 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         n_t_onsets = len(t_onsets) if t_onsets is not None else 0
         n_t_offsets = len(t_offsets) if t_offsets is not None else 0
 
+        baseline_per_beat = MorphologicalExtractor._calculate_beatwise_baseline(
+            ch_data, r_peaks, p_onsets, p_offsets, t_offsets, sfreq
+        )
+
+        if not np.all(np.isnan(baseline_per_beat)):
+            global_baseline = float(np.nanmedian(baseline_per_beat))
+        else:
+            baseline_samples = int(30 * sfreq)
+            global_baseline = float(np.nanmedian(ch_data[: min(baseline_samples, len(ch_data))]))
+
         # Build wave indices dictionary for vectorized interval calculation
         wave_indices = {
             "P": p_peaks if n_p_peaks else np.array([]),
             "Q": q_peaks if n_q_peaks else np.array([]),
-            "R": r_peaks if (n_r_peaks and r_peaks is not None) else np.array([]),
+            "R": r_peaks if n_r_peaks else np.array([]),
             "S": s_peaks if n_s_peaks else np.array([]),
             "T": t_peaks if n_t_peaks else np.array([]),
             "P_onset": p_onsets if n_p_onsets else np.array([]),
@@ -755,7 +894,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         }
 
         # Vectorized interval calculation for all pairs
-        for wave1, wave2, feature_name in _INTERVAL_PAIRS:
+        for interval_pair in _INTERVAL_PAIRS:
+            wave1, wave2, feature_name, min_interval_ms, max_interval_ms = interval_pair
             peaks1 = wave_indices.get(wave1)
             peaks2 = wave_indices.get(wave2)
 
@@ -764,20 +904,19 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             if len(peaks1) == 0 or len(peaks2) == 0:
                 continue
 
-            stats = MorphologicalExtractor._calculate_interval_stats(peaks1, peaks2, sfreq)
-
+            stats = MorphologicalExtractor._calculate_interval_stats(
+                peaks1, peaks2, sfreq, max_interval_ms, min_interval_ms
+            )
             if stats:
                 features[f"{feature_name}_mean"] = stats["mean"]
                 features[f"{feature_name}_median"] = stats["median"]
                 features[f"{feature_name}_std"] = stats["std"]
-                features[f"{feature_name}_min"] = stats["min"]
-                features[f"{feature_name}_max"] = stats["max"]
 
         # Flächen (Integrale unter den Kurven)
         if n_p_onsets and n_p_offsets:
             p_areas = []
             max_index = min(n_p_onsets, n_p_offsets)
-            for p_on, p_off in zip(p_onsets[:max_index], p_offsets[:max_index]):
+            for p_on, p_off in zip(p_onsets[:max_index], p_offsets[:max_index], strict=True):
                 if p_on >= p_off or np.isnan(p_on) or np.isnan(p_off):
                     continue
                 p_areas.append(np.sum(np.abs(ch_data[p_on:p_off])))
@@ -788,7 +927,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if n_t_onsets and n_t_offsets:
             t_areas = []
             max_index = min(n_t_onsets, n_t_offsets)
-            for t_on, t_off in zip(t_onsets[:max_index], t_offsets[:max_index]):
+            for t_on, t_off in zip(t_onsets[:max_index], t_offsets[:max_index], strict=True):
                 if t_on >= t_off or np.isnan(t_on) or np.isnan(t_off):
                     continue
                 t_areas.append(np.sum(np.abs(ch_data[t_on:t_off])))
@@ -799,7 +938,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if n_r_peaks and n_q_peaks and r_peaks is not None:
             r_slopes = []
             max_index = min(n_r_peaks, n_q_peaks)
-            for r, q in zip(r_peaks[:max_index], q_peaks[:max_index]):
+            for r, q in zip(r_peaks[:max_index], q_peaks[:max_index], strict=True):
                 if r < q or np.isnan(r) or np.isnan(q):
                     continue
                 delta_y = ch_data[r] - ch_data[q]
@@ -813,7 +952,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if n_t_onsets and n_t_offsets:
             t_slopes = []
             max_index = min(n_t_onsets, n_t_offsets)
-            for t_on, t_off in zip(t_onsets[:max_index], t_offsets[:max_index]):
+            for t_on, t_off in zip(t_onsets[:max_index], t_offsets[:max_index], strict=True):
                 if t_on >= t_off or np.isnan(t_on) or np.isnan(t_off):
                     continue
                 delta_y = ch_data[t_on] - ch_data[t_off]
@@ -825,37 +964,49 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         # Amplituden
         if n_p_peaks:
-            p_amplitudes = [ch_data[p] for p in p_peaks if not np.isnan(p)]
-            if p_amplitudes:
-                features["p_amplitude"] = float(np.mean(p_amplitudes))
+            p_peaks_array = np.asarray(p_peaks)
+            valid_mask = ~np.isnan(p_peaks_array)
+            if np.any(valid_mask):
+                valid_peaks = p_peaks_array[valid_mask].astype(int)
+                p_amplitudes = ch_data[valid_peaks]
+                features["p_amplitude_mean"] = float(np.mean(p_amplitudes))
+                features["p_amplitude_std"] = float(np.std(p_amplitudes)) if len(p_amplitudes) > 1 else 0.0
 
         if n_q_peaks:
-            q_amplitudes = [ch_data[q] for q in q_peaks if not np.isnan(q)]
-            if q_amplitudes:
-                features["q_amplitude"] = float(np.mean(q_amplitudes))
+            q_peaks_array = np.asarray(q_peaks)
+            valid_mask = ~np.isnan(q_peaks_array)
+            if np.any(valid_mask):
+                valid_peaks = q_peaks_array[valid_mask].astype(int)
+                q_amplitudes = ch_data[valid_peaks]
+                features["q_amplitude_mean"] = float(np.mean(q_amplitudes))
+                features["q_amplitude_std"] = float(np.std(q_amplitudes)) if len(q_amplitudes) > 1 else 0.0
 
             # Q wave width (duration from Q onset to Q peak)
             # Pathological if > 40ms
-            features["pathological_q_width"] = 0.0  # Initialize
+            features["q_width_pathological"] = 0.0  # Initialize
             q_onsets = waves_dict.get("ECG_Q_Onsets")
             if q_onsets is not None and len(q_onsets) > 0:
                 q_widths = []
                 max_index = min(len(q_peaks), len(q_onsets))
-                for q_peak, q_onset in zip(q_peaks[:max_index], q_onsets[:max_index]):
+                for q_peak, q_onset in zip(q_peaks[:max_index], q_onsets[:max_index], strict=True):
                     if np.isnan(q_peak) or np.isnan(q_onset) or q_peak <= q_onset:
                         continue
                     q_width_ms = (q_peak - q_onset) / sfreq * 1000
                     if q_width_ms > 0:
                         q_widths.append(q_width_ms)
                 if q_widths:
-                    features["q_wave_width"] = float(np.mean(q_widths))
+                    features["q_width"] = float(np.mean(q_widths))
                     # Pathological Q wave width (>40ms)
-                    features["pathological_q_width"] = 1.0 if np.mean(q_widths) > 40.0 else 0.0
+                    features["q_width_pathological"] = 1.0 if np.mean(q_widths) > 40.0 else 0.0
 
-        if n_r_peaks and r_peaks is not None:
-            r_amplitudes = [ch_data[r] for r in r_peaks if not np.isnan(r)]
-            if r_amplitudes:
-                features["r_amplitude"] = float(np.mean(r_amplitudes))
+        if n_r_peaks:
+            r_peaks_array = np.asarray(r_peaks)
+            valid_mask = ~np.isnan(r_peaks_array)
+            if np.any(valid_mask):
+                valid_peaks = r_peaks_array[valid_mask].astype(int)
+                r_amplitudes = ch_data[valid_peaks]
+                features["r_amplitude_mean"] = float(np.mean(r_amplitudes))
+                features["r_amplitude_std"] = float(np.std(r_amplitudes)) if len(r_amplitudes) > 1 else 0.0
 
         if n_r_peaks > 1 and r_peaks is not None:
             rr_intervals = np.diff(r_peaks) / sfreq
@@ -884,22 +1035,48 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 sd1 = float(np.nanstd(diff_rr / np.sqrt(2)))
                 # SD2: long-term variability
                 sdrr = np.nanstd(rr_intervals)  # overall HRV
-                interm = 2 * sdrr**2 - sd1**2
+                interm = 2 * math.pow(sdrr, 2) - math.pow(sd1, 2)
                 sd2 = float(np.sqrt(interm)) if interm > 0 else np.nan
-                features["sd1"] = sd1
-                features["sd2"] = sd2
-                features["sd1_sd2_ratio"] = sd1 / (sd2 + utils.EPS) if not np.isnan(sd2) else np.nan
+                features["rr_interval_sd1"] = sd1
+                features["rr_interval_sd2"] = sd2
+                features["rr_interval_sd1_sd2_ratio"] = sd1 / (sd2 + utils.EPS) if not np.isnan(sd2) else np.nan
 
         if n_s_peaks:
-            s_amplitudes = [ch_data[s] for s in s_peaks if not np.isnan(s)]
-            if s_amplitudes:
-                features["s_amplitude"] = float(np.mean(s_amplitudes))
+            s_peaks_array = np.asarray(s_peaks)
+            valid_mask = ~np.isnan(s_peaks_array)
+            if np.any(valid_mask):
+                valid_peaks = s_peaks_array[valid_mask].astype(int)
+                s_amplitudes = ch_data[valid_peaks]
+                features["s_amplitude_mean"] = float(np.mean(s_amplitudes))
+                features["s_amplitude_std"] = float(np.std(s_amplitudes)) if len(s_amplitudes) > 1 else 0.0
+
+        # J-point amplitude (R-offset amplitude)
+        r_offsets = waves_dict.get("ECG_R_Offsets")
+        if r_offsets is not None and len(r_offsets) > 0:
+            r_offsets_array = np.asarray(r_offsets)
+            valid_mask = ~np.isnan(r_offsets_array)
+            if np.any(valid_mask):
+                valid_offsets = r_offsets_array[valid_mask].astype(int)
+                # Ensure indices are within bounds
+                valid_offsets = valid_offsets[valid_offsets < len(ch_data)]
+                if len(valid_offsets) > 0:
+                    # Calculate j-point amplitude relative to baseline
+                    j_amplitudes = []
+                    for r_offset_idx in valid_offsets:
+                        beat_baseline = MorphologicalExtractor._get_beat_baseline(
+                            r_offset_idx, r_peaks, baseline_per_beat, global_baseline
+                        )
+                        j_amp = ch_data[r_offset_idx] - beat_baseline
+                        j_amplitudes.append(j_amp)
+                    if j_amplitudes:
+                        features["j_amplitude_mean"] = float(np.mean(j_amplitudes))
+                        features["j_amplitude_std"] = float(np.std(j_amplitudes)) if len(j_amplitudes) > 1 else 0.0
 
         # QRS Fragmentation (count notches/direction changes in QRS complex)
         features["qrs_fragmentation"] = 0.0
         if n_q_peaks and n_s_peaks:
             fragmentations = []
-            for q_idx, s_idx in zip(q_peaks, s_peaks):
+            for q_idx, s_idx in zip(q_peaks, s_peaks, strict=True):
                 if np.isnan(q_idx) or np.isnan(s_idx):
                     continue
                 q_pos = int(q_idx)
@@ -919,59 +1096,84 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         # Pathological Q wave detection
         # Pathological if QRS duration > 40ms AND Q amplitude > 25% of R amplitude
         features["pathological_q"] = 0.0
-        if "qrs_duration_mean" in features and "q_amplitude" in features and "r_amplitude" in features:
+        if "qrs_duration_mean" in features and "q_amplitude_mean" in features and "r_amplitude_mean" in features:
             qrs_dur = features["qrs_duration_mean"]
-            q_amp = abs(features["q_amplitude"])
-            r_amp = abs(features["r_amplitude"])
+            q_amp = abs(features["q_amplitude_mean"])
+            r_amp = abs(features["r_amplitude_mean"])
             if qrs_dur > 40 and r_amp > 0 and q_amp > 0.25 * r_amp:
                 features["pathological_q"] = 1.0
 
+        # Initialize T wave morphological features
         if n_t_peaks:
-            t_amplitudes = [ch_data[t] for t in t_peaks if not np.isnan(t)]
-            if t_amplitudes:
-                features["t_amplitude"] = float(np.mean(t_amplitudes))
+            t_peaks_array = np.asarray(t_peaks)
+            valid_mask = ~np.isnan(t_peaks_array)
+            if np.any(valid_mask):
+                valid_peaks = t_peaks_array[valid_mask].astype(int)
+                t_amplitudes = ch_data[valid_peaks]
+                features["t_amplitude_mean"] = float(np.mean(t_amplitudes))
+                features["t_amplitude_std"] = float(np.std(t_amplitudes)) if len(t_amplitudes) > 1 else 0.0
 
                 # T-wave inversion depth (for negative T-waves)
-                t_inversion_depths = [abs(amp) for amp in t_amplitudes if amp < 0]
-                if t_inversion_depths:
-                    features["t_wave_inversion_depth"] = float(np.mean(t_inversion_depths))
+                negative_mask = t_amplitudes < 0
+                if np.any(negative_mask):
+                    t_inversion_depths = np.abs(t_amplitudes[negative_mask])
+                    features["t_inversion_depth"] = float(np.mean(t_inversion_depths))
                 else:
-                    features["t_wave_inversion_depth"] = 0.0
+                    features["t_inversion_depth"] = np.nan
 
         # T-wave symmetry (ratio of ascending to descending limb duration)
         features["t_symmetry"] = 1.0
         features["biphasic_t"] = 0.0
+        features["preterminal_negative_t"] = 0.0
         features["tpeak_tend_interval"] = np.nan
         t_onsets = waves_dict.get("ECG_T_Onsets")
         t_offsets = waves_dict.get("ECG_T_Offsets")
         if t_onsets is not None and t_offsets is not None and n_t_peaks:
             symmetry_ratios = []
             biphasic_flags = []
+            preterminal_negative_flags = []
             tpeak_tend_intervals = []
-            for onset, peak, offset in zip(t_onsets, t_peaks, t_offsets):
+
+            for onset, peak, offset in zip(t_onsets, t_peaks, t_offsets, strict=True):
                 if np.isnan(onset) or np.isnan(peak) or np.isnan(offset):
                     continue
+
                 ascending_duration = peak - onset
                 descending_duration = offset - peak
                 if ascending_duration <= 0 or descending_duration <= 0:
                     continue
+
                 ratio = ascending_duration / descending_duration
                 ratio = max(0.1, min(2.0, ratio))
                 symmetry_ratios.append(ratio)
 
-                # Tpeak-Tend interval (repolarization dispersion)
-                tpeak_tend = (offset - peak) / sfreq * 1000  # Convert to milliseconds
+                tpeak_tend = (offset - peak) / sfreq * 1000
                 tpeak_tend_intervals.append(tpeak_tend)
 
-                # Biphasic T wave detection
-                # Extract T segment for this beat
                 t_start = max(int(onset), 0)
                 t_end = min(int(offset), len(ch_data))
-                if t_end > t_start:
-                    t_segment = ch_data[t_start:t_end]
-                    has_positive = np.any(t_segment > 0.1)
-                    has_negative = np.any(t_segment < -0.1)
-                    biphasic_flags.append(1.0 if (has_positive and has_negative) else 0.0)
+                if t_end <= t_start:
+                    continue
+
+                t_segment = ch_data[t_start:t_end]
+                has_positive = np.any(t_segment > 0.1)
+                has_negative = np.any(t_segment < -0.1)
+                biphasic_flags.append(1.0 if (has_positive and has_negative) else 0.0)
+
+                beat_baseline = MorphologicalExtractor._get_beat_baseline(
+                    int(onset), r_peaks, baseline_per_beat, global_baseline
+                )
+
+                t_duration = t_end - t_start
+                terminal_start = int(t_start + 0.6 * t_duration)
+                terminal_end = t_end
+                if terminal_end <= terminal_start or terminal_start >= len(ch_data):
+                    continue
+
+                terminal_segment = ch_data[terminal_start:terminal_end]
+                terminal_below_baseline = terminal_segment < (beat_baseline - 0.05)
+                preterminal_negative = np.sum(terminal_below_baseline) / len(terminal_segment) > 0.5
+                preterminal_negative_flags.append(1.0 if preterminal_negative else 0.0)
 
             if symmetry_ratios:
                 features["t_symmetry"] = float(np.mean(symmetry_ratios))
@@ -979,69 +1181,94 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["tpeak_tend_interval"] = float(np.mean(tpeak_tend_intervals))
             if biphasic_flags:
                 features["biphasic_t"] = float(np.mean(biphasic_flags))
+            if preterminal_negative_flags:
+                features["preterminal_negative_t"] = float(np.mean(preterminal_negative_flags))
 
         # ST Segment Features
-        # Calculate global baseline (isoelectric line) from first 200ms of signal
-        baseline_samples = int(0.2 * sfreq)  # 200ms
-        global_baseline = np.mean(ch_data[: min(baseline_samples, len(ch_data))])
-
-        if n_s_peaks and n_r_peaks:
+        # Use R-offset (J-point) and T-onset when available, otherwise fall back to S-peak based method
+        if n_s_peaks and r_peaks is not None:
             st_elevations = []
-            st_depressions = []
             st_slopes = []
             st60_amplitudes = []
             st80_amplitudes = []
             st_areas = []
 
-            # Process each S-peak to extract ST segment features
-            for s_peak in s_peaks:
+            # Get R-offsets (J-points) and T-onsets from waves_dict
+            r_offsets = waves_dict.get("ECG_R_Offsets")
+            t_onsets_st = waves_dict.get("ECG_T_Onsets")
+
+            n_r_offsets = len(r_offsets) if r_offsets is not None else 0
+            n_t_onsets_st = len(t_onsets_st) if t_onsets_st is not None else 0
+
+            # Determine if we can use R-offset based method
+            use_r_offset = n_r_offsets > 0 and n_t_onsets_st > 0
+
+            for i, s_peak in enumerate(s_peaks):
                 if np.isnan(s_peak):
                     continue
 
                 s_idx = int(s_peak)
+                beat_baseline = MorphologicalExtractor._get_beat_baseline(
+                    s_idx, r_peaks, baseline_per_beat, global_baseline
+                )
 
-                # ST segment: J-point (S-peak) + 20ms to J-point + 80ms
-                st_start = s_idx + int(0.02 * sfreq)  # J+20ms
-                st_end = min(len(ch_data), s_idx + int(0.08 * sfreq))  # J+80ms
+                # Try to use R-offset (J-point) based method first
+                st_start = None
+                st_end = None
+                j_point_idx = s_idx  # Default to S-peak
+
+                if (
+                    use_r_offset
+                    and i < n_r_offsets
+                    and i < n_t_onsets_st
+                    and r_offsets is not None
+                    and t_onsets_st is not None
+                ):
+                    r_offset = r_offsets[i]
+                    t_onset = t_onsets_st[i]
+
+                    if not np.isnan(r_offset) and not np.isnan(t_onset):
+                        j_point_idx = int(r_offset)
+                        t_onset_idx = int(t_onset)
+
+                        # ST segment from J-point to T-onset
+                        if j_point_idx < t_onset_idx and j_point_idx < len(ch_data):
+                            st_start = j_point_idx
+                            st_end = min(len(ch_data), t_onset_idx)
+
+                # Fallback to S-peak based method if R-offset method not available
+                if st_start is None or st_end is None:
+                    # Use S-peak + 20ms to S-peak + 80ms as fallback
+                    st_start = s_idx + int(0.02 * sfreq)
+                    st_end = min(len(ch_data), s_idx + int(0.08 * sfreq))
+                    j_point_idx = s_idx  # Use S-peak as approximation
 
                 if st_end > st_start and st_start < len(ch_data):
                     st_segment = ch_data[st_start:st_end]
 
-                    # ST level relative to baseline
-                    st_level = np.mean(st_segment) - global_baseline
+                    st_level = np.mean(st_segment) - beat_baseline
+                    st_elevations.append(st_level)
 
-                    # ST elevation (positive deviation)
-                    st_elevations.append(max(0, st_level))
-
-                    # ST depression (negative deviation)
-                    st_depressions.append(max(0, -st_level))
-
-                    # ST slope (trend across ST segment)
                     if len(st_segment) > 1:
                         slope = (st_segment[-1] - st_segment[0]) / len(st_segment)
                         st_slopes.append(slope)
 
-                    # ST amplitude at J+60ms
-                    st60_idx = min(len(ch_data), s_idx + int(0.06 * sfreq))
+                    # ST measurements at J+60ms and J+80ms (or S+60ms/S+80ms as fallback)
+                    st60_idx = min(len(ch_data), j_point_idx + int(0.06 * sfreq))
                     if st60_idx < len(ch_data):
-                        st60_amplitudes.append(ch_data[st60_idx] - global_baseline)
+                        st60_amplitudes.append(ch_data[st60_idx] - beat_baseline)
 
-                    # ST amplitude at J+80ms
-                    st80_idx = min(len(ch_data), s_idx + int(0.08 * sfreq))
+                    st80_idx = min(len(ch_data), j_point_idx + int(0.08 * sfreq))
                     if st80_idx < len(ch_data):
-                        st80_amplitudes.append(ch_data[st80_idx] - global_baseline)
+                        st80_amplitudes.append(ch_data[st80_idx] - beat_baseline)
 
-                    # ST segment area under curve
-                    st_segment_relative = st_segment - global_baseline
+                    st_segment_relative = st_segment - beat_baseline
                     st_areas.append(np.trapezoid(st_segment_relative))
 
-            # Store averaged ST segment features
             if st_elevations:
-                features["st_elevation"] = float(np.mean(st_elevations))
-            if st_depressions:
-                features["st_depression"] = float(np.mean(st_depressions))
-            if st_elevations and st_depressions:
-                features["j_point_elevation"] = features.get("st_elevation", 0.0) - features.get("st_depression", 0.0)
+                features["st_level"] = float(np.mean(st_elevations))
+            else:
+                ...
             if st_slopes:
                 features["st_slope"] = float(np.mean(st_slopes))
             if st60_amplitudes:
@@ -1051,15 +1278,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             if st_areas:
                 features["st_area"] = float(np.mean(st_areas))
 
-            # Early repolarization pattern (J-point elevation > 0.1mV)
-            if "j_point_elevation" in features:
-                features["early_repolarization"] = 1.0 if features["j_point_elevation"] > 0.1 else 0.0
-            else:
-                features["early_repolarization"] = 0.0
-        else:
-            # Initialize early_repolarization even when no ST segments found
-            features["early_repolarization"] = 0.0
-
         # QTc (Corrected QT interval using Bazett's formula)
         # QTc = QT / √(RR) where QT is in ms and RR is in seconds
         if "qt_interval_mean" in features and "rr_interval_mean" in features:
@@ -1068,28 +1286,58 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             if rr_sec > 0:
                 features["qtc_bazett"] = qt_ms / np.sqrt(rr_sec)
                 # Fridericia formula: QTc = QT / (RR^(1/3))
-                features["qtc_fridericia"] = qt_ms / ((rr_sec) ** (1 / 3))
+                features["qtc_fridericia"] = qt_ms / math.cbrt(rr_sec)
             else:
                 features["qtc_bazett"] = qt_ms  # Fallback if RR is invalid
                 features["qtc_fridericia"] = qt_ms  # Fallback if RR is invalid
 
         # Interval Ratios
-        # Convert RR interval from seconds to milliseconds for ratio calculations
-        rr_ms = features.get("rr_interval_mean", 0.0) * 1000
+        rr_mean = features.get("rr_interval_mean")
+        rr_ms = rr_mean * 1000 if rr_mean is not None else None
 
         # QT/RR ratio
-        if "qt_interval_mean" in features and rr_ms > 0:
+        if "qt_interval_mean" in features and rr_ms is not None and rr_ms > 0:
             features["qt_rr_ratio"] = features["qt_interval_mean"] / rr_ms
+        else:
+            features["qt_rr_ratio"] = np.nan
 
         # PR/RR ratio (using pq_interval as PR interval)
-        if "pq_interval_mean" in features and rr_ms > 0:
+        if "pq_interval_mean" in features and rr_ms is not None and rr_ms > 0:
             features["pr_rr_ratio"] = features["pq_interval_mean"] / rr_ms
+        else:
+            features["pr_rr_ratio"] = np.nan
 
         # T/QT ratio
         if "t_duration_mean" in features and "qt_interval_mean" in features:
             qt_ms = features["qt_interval_mean"]
             if qt_ms > 0:
                 features["t_qt_ratio"] = features["t_duration_mean"] / qt_ms
+            else:
+                features["t_qt_ratio"] = np.nan
+        else:
+            features["t_qt_ratio"] = np.nan
+
+        # T/R amplitude ratio
+        if "t_amplitude_mean" in features and "r_amplitude_mean" in features:
+            r_amp = features["r_amplitude_mean"]
+            t_amp = features["t_amplitude_mean"]
+            if r_amp is not None and abs(r_amp) > 0:
+                features["t_r_ratio"] = float(t_amp / r_amp)
+            else:
+                features["t_r_ratio"] = np.nan
+        else:
+            features["t_r_ratio"] = np.nan
+
+        # Q/R amplitude ratio
+        if "q_amplitude_mean" in features and "r_amplitude_mean" in features:
+            r_amp = features["r_amplitude_mean"]
+            q_amp = features["q_amplitude_mean"]
+            if r_amp is not None and abs(r_amp) > 0 and q_amp is not None:
+                features["q_to_r_ratio"] = float(abs(q_amp) / abs(r_amp))
+            else:
+                features["q_to_r_ratio"] = np.nan
+        else:
+            features["q_to_r_ratio"] = np.nan
 
         return features
 
@@ -1128,39 +1376,86 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         return None, 0, None
 
     @staticmethod
-    def _calculate_interval_stats(peaks1: np.ndarray, peaks2: np.ndarray, sfreq: float) -> dict[str, float]:
-        """Vectorized interval statistics calculation.
+    def _calculate_interval_stats(
+        peaks1: np.ndarray,
+        peaks2: np.ndarray,
+        sfreq: float,
+        max_interval_ms: float | None = None,
+        min_interval_ms: float | None = None,
+    ) -> dict[str, float]:
+        """Interval statistics calculation with intelligent peak pairing.
+
+        Pairs peaks from peaks1 with peaks from peaks2 by finding the closest valid match.
+        Handles edge cases where recordings start or end mid-wave, resulting in unpaired peaks.
 
         Args:
-            peaks1: First wave peaks (e.g., Q peaks)
-            peaks2: Second wave peaks (e.g., S peaks)
+            peaks1: First wave peaks (e.g., Q peaks, P onsets)
+            peaks2: Second wave peaks (e.g., S peaks, P offsets)
             sfreq: Sampling frequency in Hz
+            max_interval_ms: Maximum allowed interval in milliseconds. If specified,
+                only pairs where (peaks2 - peaks1) <= max_interval_ms will be considered.
+                Defaults to None (no limit).
+            min_interval_ms: Minimum allowed interval in milliseconds. If specified,
+                only pairs where (peaks2 - peaks1) >= min_interval_ms will be considered.
+                Defaults to None (no limit).
 
         Returns:
-            Dictionary with mean, median, std, min, max in milliseconds, or empty dict if no valid intervals
+            Dictionary with mean, median, std in milliseconds, or empty dict if no valid intervals
         """
-        # Ensure arrays are numpy arrays (might be lists from neurokit2)
-        p1 = np.asarray(peaks1)
-        p2 = np.asarray(peaks2)
+        # Use vectorized pair_peaks function for efficient pairing
+        intervals_ms = pair_peaks(peaks1, peaks2, sfreq, max_interval_ms, min_interval_ms)
 
-        n = min(len(p1), len(p2))
-        if n == 0:
+        if intervals_ms.size == 0:
             return {}
-
-        p1 = p1[:n]
-        p2 = p2[:n]
-
-        valid_mask = (p1 < p2) & ~np.isnan(p1) & ~np.isnan(p2)
-
-        if not np.any(valid_mask):
-            return {}
-
-        intervals_ms = (p2[valid_mask] - p1[valid_mask]) / sfreq * 1000
 
         return {
             "mean": float(np.mean(intervals_ms)),
             "median": float(np.median(intervals_ms)),
             "std": float(np.std(intervals_ms)),
-            "min": float(np.min(intervals_ms)),
-            "max": float(np.max(intervals_ms)),
         }
+
+
+def pair_peaks(
+    peaks1: np.ndarray,
+    peaks2: np.ndarray,
+    sfreq: float,
+    max_interval_ms: float | None = None,
+    min_interval_ms: float | None = None,
+) -> np.ndarray:
+    """
+    For each peak in peaks1, find the closest valid peak in peaks2.
+    - peaks2 can be reused multiple times.
+    - peaks must satisfy: peak2 > peak1 and (optionally) min_interval_ms <= interval <= max_interval_ms.
+    - NaNs in either input are ignored.
+    Returns:
+        interval_ms (1D numpy array; rows with no valid candidate are dropped)
+    """
+    # Ensure numpy arrays
+    p1 = np.asarray(peaks1, dtype=float)
+    p2 = np.asarray(peaks2, dtype=float)
+
+    if p1.size == 0 or p2.size == 0:
+        return np.array([])
+
+    mask1 = ~np.isnan(p1)
+    mask2 = ~np.isnan(p2)
+    p1v = p1[mask1]
+    p2v = p2[mask2]
+
+    if p1v.size == 0 or p2v.size == 0:
+        return np.array([])
+
+    intervals_ms = (p2v[None, :] - p1v[:, None]) / sfreq * 1000.0
+    cand_mask = intervals_ms > 0
+
+    if min_interval_ms is not None:
+        cand_mask &= intervals_ms >= min_interval_ms
+
+    if max_interval_ms is not None:
+        cand_mask &= intervals_ms <= max_interval_ms
+
+    intervals_ms_valid = np.where(cand_mask, intervals_ms, np.inf)
+    best_j = np.argmin(intervals_ms_valid, axis=1)
+    best_intervals = intervals_ms_valid[np.arange(p1v.size), best_j]
+    valid_rows = np.isfinite(best_intervals)
+    return best_intervals[valid_rows]

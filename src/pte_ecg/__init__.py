@@ -6,7 +6,7 @@ multi-channel ECG data and supports parallel processing for efficient computatio
 """
 
 from ._logging import logger, set_log_file, set_log_level
-from .config import ConfigLoader, ExtractorConfig, FeaturesConfig, Settings
+from .config import ConfigLoader, FeaturesConfig, Settings
 from .core import FeatureExtractor, get_features
 from .feature_extractors.registry import ExtractorRegistry
 from .preprocessing import (
@@ -33,7 +33,6 @@ __all__ = [
     "NotchArgs",
     "NormalizeArgs",
     "FeaturesConfig",
-    "ExtractorConfig",
     "ConfigLoader",
     "FeatureExtractor",
     "ExtractorRegistry",

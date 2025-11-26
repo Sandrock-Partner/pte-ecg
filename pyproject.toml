@@ -13,11 +13,12 @@ dependencies = [
     "neurokit2>=0.2.11",
     "numpy>=2.0.0",
     "pandas>=2.3.0",
+    "pyarrow>=22.0.0",
     "pydantic>=2.11.7",
-    "pywavelets>=1.8.0",  # This is actually a neurokit2 dependency
+    "pywavelets>=1.8.0", # This is actually a neurokit2 dependency
     "scipy>=1.15.3",
     "tqdm>=4.66.0",
-    "ts2vg>=1.2.4",       # This is actually a neurokit2 dependency
+    "ts2vg>=1.2.4", # This is actually a neurokit2 dependency
 ]
 dynamic = ["version"]
 keywords = ["ecg", "features", "timeseries", "electrocardiogram"]

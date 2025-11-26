@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from ._logging import logger
-from .config import ConfigLoader, ExtractorConfig, Settings
+from .config import ConfigLoader, Settings
 from .feature_extractors.base import FeatureExtractorProtocol
 from .preprocessing import preprocess
 from .types import ECGData
@@ -18,36 +18,46 @@ class FeatureExtractor:
     configured extractors. It handles the complete pipeline from raw
     ECG data to extracted features.
 
+    Individual extractors receive this instance via dependency injection,
+    allowing them to access sfreq, lead_order, and settings as needed.
+
     Args:
+        sfreq: Sampling frequency in Hz
         settings: Complete settings for preprocessing and feature extraction
 
     Examples:
-        # Use default settings
-        extractor = FeatureExtractor()
-        features = extractor.extract_features(ecg_data, sfreq=1000)
+        # Use default settings (only morphological enabled)
+        extractor = FeatureExtractor(sfreq=1000)
+        features = extractor.extract_features(ecg_data)
 
-        # Use custom settings
+        # Enable additional extractors
         settings = Settings()
-        settings.features.morphological.features = ["st_elevation", "qtc_interval"]
-        settings.features.fft.enabled = False
-        extractor = FeatureExtractor(settings)
-        features = extractor.extract_features(ecg_data, sfreq=1000)
+        settings.features.statistical = {"enabled": True}
+        extractor = FeatureExtractor(sfreq=1000, settings=settings)
+        features = extractor.extract_features(ecg_data)
     """
 
-    def __init__(self, settings: Settings | None = None):
+    def __init__(self, sfreq: float, settings: Settings | None = None):
         """Initialize the feature extractor.
 
         Args:
+            sfreq: Sampling frequency in Hz
             settings: Settings object. If None, uses default settings.
         """
+        self.sfreq = sfreq
         self.settings = settings or Settings()
         self._extractors = self._initialize_extractors()
 
-    def _initialize_extractors(self) -> dict[str, FeatureExtractorProtocol]:
-        """Initialize enabled feature extractors.
+    @property
+    def lead_order(self) -> list[str]:
+        """Return the lead order from settings."""
+        return self.settings.lead_order
 
-        Uses the ExtractorRegistry to discover and instantiate all registered extractors.
-        Supports both hardcoded and plugin-registered extractors.
+    def _initialize_extractors(self) -> dict[str, FeatureExtractorProtocol]:
+        """Initialize enabled feature extractors using dependency injection.
+
+        Each extractor receives this FeatureExtractor instance, allowing them
+        to access sfreq, lead_order, and other settings as needed.
 
         Returns:
             Dictionary mapping extractor names to initialized extractor instances
@@ -61,23 +71,20 @@ class FeatureExtractor:
         if not registered_extractors:
             raise ValueError("ExtractorRegistry is empty. Define entry points in pyproject.toml to use the registry.")
 
-        # Iterate through all registry-discovered extractors
         for extractor_name in registered_extractors:
-            # Get config for this extractor, with fallback to default config
-            extractor_config = getattr(self.settings.features, extractor_name, ExtractorConfig())
+            extractor_config = self.settings.features.get_extractor_config(extractor_name)
 
-            # Skip if extractor is disabled
-            if not extractor_config.enabled:
+            if not extractor_config.get("enabled", False):
                 logger.debug(f"Extractor '{extractor_name}' is disabled, skipping")
                 continue
 
-            # Get extractor class from registry and initialize
+            # Pass all config kwargs except 'enabled' to the extractor
+            config_kwargs = {k: v for k, v in extractor_config.items() if k != "enabled"}
+
+            # Get extractor class from registry and initialize with dependency injection + config
             extractor_class = registry.get(extractor_name)
-            extractors[extractor_name] = extractor_class(settings=self.settings)
-            logger.info(
-                f"Initialized {extractor_name} extractor with "
-                f"{len(extractors[extractor_name].selected_features)} features"
-            )
+            extractors[extractor_name] = extractor_class(self, **config_kwargs)
+            logger.info(f"Initialized {extractor_name} extractor")
 
         if not extractors:
             raise ValueError("No feature extractors enabled. Enable at least one extractor in settings.")
@@ -88,7 +95,6 @@ class FeatureExtractor:
     def extract_features(
         self,
         ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
-        sfreq: float,
     ) -> pd.DataFrame:
         """Extract features from ECG data.
 
@@ -99,7 +105,6 @@ class FeatureExtractor:
 
         Args:
             ecg: ECG data with shape (n_ecgs, n_channels, n_timepoints)
-            sfreq: Sampling frequency in Hz
 
         Returns:
             DataFrame with shape (n_ecgs, n_features) containing all extracted features.
@@ -109,9 +114,9 @@ class FeatureExtractor:
             ValueError: If input data has invalid shape or no extractors are enabled
 
         Examples:
-            extractor = FeatureExtractor()
+            extractor = FeatureExtractor(sfreq=1000)
             ecg_data = np.random.randn(10, 12, 10000)  # 10 ECGs, 12 leads, 10s at 1kHz
-            features = extractor.extract_features(ecg_data, sfreq=1000)
+            features = extractor.extract_features(ecg_data)
         """
         # Validate input shape
         if ecg.ndim != 3:
@@ -122,24 +127,27 @@ class FeatureExtractor:
         n_ecgs, n_channels, n_times = ecg.shape
 
         # Validate that number of channels matches the lead_order
-        expected_n_channels = len(self.settings.lead_order)
+        expected_n_channels = len(self.lead_order)
         if n_channels != expected_n_channels:
             raise ValueError(
                 f"ECG data has {n_channels} channels, but lead_order specifies {expected_n_channels} leads. "
-                f"Expected lead order: {self.settings.lead_order}. "
+                f"Expected lead order: {self.lead_order}. "
                 f"Please ensure your ECG data has the same number of channels as specified in lead_order."
             )
 
         logger.info(
             f"Extracting features from {n_ecgs} ECGs with {n_channels} channels "
-            f"(leads: {self.settings.lead_order}) and {n_times} timepoints at {sfreq} Hz"
+            f"(leads: {self.lead_order}) and {n_times} timepoints at {self.sfreq} Hz"
         )
 
-        # Apply preprocessing
+        # Apply preprocessing (may update self.sfreq)
         if self.settings.preprocessing.enabled:
             logger.info("Applying preprocessing pipeline")
-            ecg, sfreq = preprocess(ecg, sfreq, self.settings.preprocessing)
-            logger.info(f"Preprocessing complete. New sampling frequency: {sfreq} Hz")
+            ecg, new_sfreq = preprocess(ecg, self.sfreq, self.settings.preprocessing)
+            if new_sfreq != self.sfreq:
+                logger.info(f"Sampling frequency changed: {self.sfreq} Hz -> {new_sfreq} Hz")
+                self.sfreq = new_sfreq
+            logger.info("Preprocessing complete")
         else:
             logger.info("Preprocessing disabled, using raw ECG data")
 
@@ -147,7 +155,7 @@ class FeatureExtractor:
         feature_dfs = []
         for extractor_name, extractor in self._extractors.items():
             logger.info(f"Extracting {extractor_name} features...")
-            features = extractor.get_features(ecg, sfreq)
+            features = extractor.get_features(ecg)
             feature_dfs.append(features)
             logger.info(f"Extracted {features.shape[1]} {extractor_name} features from {features.shape[0]} samples")
 
@@ -193,13 +201,16 @@ def get_features(
         ValidationError: If config file doesn't match schema
 
     Examples:
-        # Use default settings (12-lead standard order)
+        # Use default settings (morphological enabled, 12-lead standard order)
         features = pte_ecg.get_features(ecg_data, sfreq=1000)
 
-        # Use Settings object with custom lead order
+        # Enable additional extractors
         settings = pte_ecg.Settings()
-        settings.lead_order = ["I", "II", "III", "aVR", "aVL", "aVF"]  # Only limb leads
-        settings.features.morphological.features = ["st_elevation", "qtc_interval"]
+        settings.features.statistical = {"enabled": True}
+        features = pte_ecg.get_features(ecg_data, sfreq=1000, settings=settings)
+
+        # Custom lead order (limb leads only)
+        settings = pte_ecg.Settings(lead_order=["I", "II", "III", "aVR", "aVL", "aVF"])
         features = pte_ecg.get_features(ecg_data, sfreq=1000, settings=settings)
 
         # Load from config file
@@ -219,5 +230,5 @@ def get_features(
         raise TypeError(f"settings must be a Settings object, str, Path, or None, got {type(settings).__name__}")
 
     # Create extractor and run feature extraction
-    extractor = FeatureExtractor(settings_obj)
-    return extractor.extract_features(ecg, sfreq)
+    extractor = FeatureExtractor(sfreq, settings_obj)
+    return extractor.extract_features(ecg)

@@ -14,23 +14,23 @@ def test_get_features_basic(test_data: tuple[np.ndarray, int]):
 
     settings = pte_ecg.Settings()
 
-    # Extract features with default settings
+    # Extract features with default settings (morphological enabled by default)
     features = pte_ecg.get_features(ecg_data, sfreq=sfreq, settings=settings)
 
     # Basic assertions
     assert isinstance(features, pd.DataFrame)
     assert len(features.columns) > 0  # At least one feature extracted
 
-    # Check for common feature prefixes
+    # Check for common feature prefixes (morphological is enabled by default)
     feature_columns = set(features.columns)
-    assert any(col.startswith("fft_") for col in feature_columns)  # FFT features
+    assert any(col.startswith("morphological_") for col in feature_columns)
 
 
 def test_get_features_custom_settings(test_data: tuple[np.ndarray, int]):
     """Test get_features with custom settings."""
     ecg_data, sfreq = test_data
 
-    # Create custom settings with only statistical features enabled
+    # Create custom settings with only FFT features enabled
     settings = pte_ecg.Settings()
     settings.preprocessing.resample.enabled = True
     settings.preprocessing.resample.sfreq_new = sfreq / 2
@@ -45,11 +45,12 @@ def test_get_features_custom_settings(test_data: tuple[np.ndarray, int]):
     settings.preprocessing.normalize.enabled = True
     settings.preprocessing.normalize.mode = "zscore"
 
-    settings.features.fft.enabled = True
-    settings.features.morphological.enabled = False
-    settings.features.nonlinear.enabled = False
-    settings.features.welch.enabled = False
-    settings.features.statistical.enabled = False
+    # Enable only FFT, disable all others
+    settings.features.fft = {"enabled": True}
+    settings.features.morphological = {"enabled": False}
+    settings.features.nonlinear = {"enabled": False}
+    settings.features.welch = {"enabled": False}
+    settings.features.statistical = {"enabled": False}
 
     # Extract features
     features = pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)
@@ -83,21 +84,19 @@ def test_get_features_invalid_input():
 def test_get_features_empty_features(test_data: tuple[np.ndarray, int]):
     """Test get_features with no features enabled."""
     ecg_data, sfreq = test_data
-    settings = pte_ecg.Settings()
-
-    # Disable all features
-    for feature in [
-        settings.features.fft,
-        settings.features.morphological,
-        settings.features.nonlinear,
-        settings.features.statistical,
-        settings.features.welch,
-    ]:
-        feature.enabled = False
 
     # Should raise ValueError when no features are enabled
-    with pytest.raises(ValueError, match="No feature extractors enabled"):
-        pte_ecg.get_features(ecg=ecg_data, sfreq=sfreq, settings=settings)
+    with pytest.raises(ValueError, match="At least one feature extractor must be enabled"):
+        pte_ecg.Settings(
+            features=pte_ecg.FeaturesConfig(
+                fft={"enabled": False},
+                morphological={"enabled": False},
+                nonlinear={"enabled": False},
+                statistical={"enabled": False},
+                welch={"enabled": False},
+                waveshape={"enabled": False},
+            )
+        )
 
 
 if __name__ == "__main__":

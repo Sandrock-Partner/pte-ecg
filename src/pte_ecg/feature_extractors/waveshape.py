@@ -12,11 +12,11 @@ or:
 import numpy as np
 import pandas as pd
 
-from . import utils
 from .._logging import logger
+from ..core import FeatureExtractor
+from . import utils
 from .base import BaseFeatureExtractor
 
-# Check for optional dependency
 try:
     import pybispectra
 
@@ -60,11 +60,11 @@ class WaveShapeExtractor(BaseFeatureExtractor):
         "bispectrum_angle",
     ]
 
-    def get_features(
-        self,
-        ecg: np.ndarray,
-        sfreq: float,
-    ) -> pd.DataFrame:
+    def __init__(self, parent: FeatureExtractor, n_jobs: int=-1):
+        self.parent = parent
+        self.n_jobs = n_jobs
+
+    def get_features(self, ecg: np.ndarray) -> pd.DataFrame:
         """Extract waveshape features from ECG data.
 
         Args:
@@ -93,6 +93,7 @@ class WaveShapeExtractor(BaseFeatureExtractor):
         pybispectra.set_precision("single")
 
         # Convert sfreq to int if needed
+        sfreq = self.sfreq
         if isinstance(sfreq, float):
             sfreq = int(sfreq)
 
@@ -127,17 +128,12 @@ class WaveShapeExtractor(BaseFeatureExtractor):
             # Store original shape before reshape
             orig_shape = results.shape
             # transform results from (channels, f1s, f2s) to (channels*f1s*f2s)
-            results = results.reshape(
-                results.shape[0] * results.shape[1] * results.shape[2], -1
-            )
+            results = results.reshape(results.shape[0] * results.shape[1] * results.shape[2], -1)
             # [np.abs, np.real, np.imag, np.angle]
             results_all.append(results)
 
             # TODO: Decide if plotting code should remain in production extractor
-            print(
-                f"Waveshape results: [{orig_shape[0]} channels x "
-                f"{orig_shape[1]} f1s x {orig_shape[2]} f2s]"
-            )
+            print(f"Waveshape results: [{orig_shape[0]} channels x {orig_shape[1]} f1s x {orig_shape[2]} f2s]")
             figs, axes = waveshape.results.plot(
                 major_tick_intervals=10,
                 minor_tick_intervals=2,

@@ -1,9 +1,12 @@
 """Statistical feature extractor."""
 
+from typing import Literal
+
 import numpy as np
 import pandas as pd
 import scipy.stats
 
+from ..core import FeatureExtractor
 from .base import BaseFeatureExtractor
 
 
@@ -30,7 +33,6 @@ class StatisticalExtractor(BaseFeatureExtractor):
 
     Args:
         selected_features: List of features to extract. If None, extract all.
-        n_jobs: Number of parallel jobs (not used - vectorized operations)
 
     Examples:
         # Extract all statistical features
@@ -61,11 +63,11 @@ class StatisticalExtractor(BaseFeatureExtractor):
         "autocorr",
     ]
 
-    def get_features(
-        self,
-        ecg: np.ndarray,
-        sfreq: float,
-    ) -> pd.DataFrame:
+    def __init__(self, parent: FeatureExtractor, selected_features: list[str] | Literal["all"] = "all"):
+        self.parent = parent
+        self.selected_features = selected_features if selected_features != "all" else self.available_features
+
+    def get_features(self, ecg: np.ndarray) -> pd.DataFrame:
         """Extract statistical features from ECG data.
 
         Args:
@@ -81,8 +83,7 @@ class StatisticalExtractor(BaseFeatureExtractor):
         """
         if ecg.ndim != 3:
             raise ValueError(
-                f"ECG data must have 3 dimensions (n_samples, n_channels, n_timepoints), "
-                f"got shape {ecg.shape}"
+                f"ECG data must have 3 dimensions (n_samples, n_channels, n_timepoints), got shape {ecg.shape}"
             )
 
         n_samples, n_channels, n_timepoints = ecg.shape
@@ -102,9 +103,7 @@ class StatisticalExtractor(BaseFeatureExtractor):
             mode_values = np.zeros((n_samples, n_channels))
             for i in range(n_samples):
                 for j in range(n_channels):
-                    mode_values[i, j] = scipy.stats.mode(
-                        ecg[i, j, :], keepdims=False
-                    ).mode
+                    mode_values[i, j] = scipy.stats.mode(ecg[i, j, :], keepdims=False).mode
             feature_dict["mode"] = mode_values
         if self._should_extract_feature("var"):
             feature_dict["var"] = np.var(ecg, axis=-1)
@@ -148,9 +147,7 @@ class StatisticalExtractor(BaseFeatureExtractor):
 
         # Create column names using lead names
         column_names = [
-            f"statistical_{name}_{self.lead_order[ch]}"
-            for ch in range(n_channels)
-            for name in feature_names_ordered
+            f"statistical_{name}_{self.lead_order[ch]}" for ch in range(n_channels) for name in feature_names_ordered
         ]
 
         return pd.DataFrame(features_reshaped, columns=column_names)
@@ -165,15 +162,13 @@ class StatisticalExtractor(BaseFeatureExtractor):
             Autocorrelation values with shape (n_samples, n_channels)
         """
         x = ecg[:, :, :-1]  # All but last timepoint
-        y = ecg[:, :, 1:]   # All but first timepoint
+        y = ecg[:, :, 1:]  # All but first timepoint
 
         x_mean = np.mean(x, axis=-1, keepdims=True)
         y_mean = np.mean(y, axis=-1, keepdims=True)
 
         numerator = np.sum((x - x_mean) * (y - y_mean), axis=-1)
-        denominator = np.sqrt(
-            np.sum((x - x_mean) ** 2, axis=-1) * np.sum((y - y_mean) ** 2, axis=-1)
-        )
+        denominator = np.sqrt(np.sum((x - x_mean) ** 2, axis=-1) * np.sum((y - y_mean) ** 2, axis=-1))
 
         return numerator / denominator
 

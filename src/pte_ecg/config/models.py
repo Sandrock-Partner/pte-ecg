@@ -1,126 +1,73 @@
 """Pydantic models for configuration."""
 
-from typing import Literal
+from typing import Any
 
 import pydantic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from ..constants import ALLOWED_LEAD_NAMES, STANDARD_LEAD_NAMES
 from ..preprocessing import PreprocessingSettings
 
 
-class ExtractorConfig(BaseModel):
-    """Configuration for a single feature extractor.
-
-    Args:
-        enabled: Whether this extractor should be used
-        features: List of specific features to extract, or "all" for all features
-        n_jobs: Number of parallel jobs (-1 = all CPUs, >0 = specific count)
-
-    Examples:
-        # Extract all features
-        config = ExtractorConfig(enabled=True, features="all")
-
-        # Extract specific features only
-        config = ExtractorConfig(
-            enabled=True,
-            features=["st_elevation", "qtc_interval"],
-            n_jobs=4
-        )
-    """
-
-    enabled: bool = True
-    features: list[str] | Literal["all"] = "all"
-    n_jobs: int = -1
-
-
 class FeaturesConfig(BaseModel):
     """Top-level configuration for all feature extractors.
 
-    Each attribute corresponds to a feature extractor and uses ExtractorConfig
-    for configuration. Supports both hardcoded extractors (for backward compatibility)
-    and dynamically discovered extractors via plugins.
+    Each attribute is a dictionary with extractor-specific settings.
+    The only required key is 'enabled' (bool). All other keys are
+    passed to the extractor as keyword arguments.
 
     Attributes:
-        fft: FFT-based frequency domain features
-        morphological: Waveform shape and interval measurements
-        statistical: Basic statistical summaries
-        welch: Power spectral density features
+        morphological: Waveform shape and interval measurements (enabled by default)
+        fft: FFT-based frequency domain features (disabled by default)
+        statistical: Basic statistical summaries (disabled by default)
+        welch: Power spectral density features (disabled by default)
         nonlinear: Complexity and entropy features (disabled by default)
         waveshape: Bispectrum-based features (disabled by default)
 
-    Dynamic extractors registered via plugins are automatically supported and
-    can be accessed via attribute access. They will use default ExtractorConfig
-    values if not explicitly configured.
+    Examples:
+        # Enable morphological (default) and statistical extractors
+        config = FeaturesConfig(
+            statistical={"enabled": True}
+        )
+
+        # Enable fft with custom settings
+        config = FeaturesConfig(
+            fft={"enabled": True, "n_jobs": 4}
+        )
     """
 
-    model_config = ConfigDict(extra="allow")
+    morphological: dict[str, Any] = Field(default_factory=lambda: {"enabled": True})
+    fft: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
+    statistical: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
+    welch: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
+    nonlinear: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
+    waveshape: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
 
-    fft: ExtractorConfig = Field(default_factory=ExtractorConfig)
-    morphological: ExtractorConfig = Field(default_factory=ExtractorConfig)
-    statistical: ExtractorConfig = Field(default_factory=ExtractorConfig)
-    welch: ExtractorConfig = Field(default_factory=ExtractorConfig)
-    nonlinear: ExtractorConfig = Field(default_factory=lambda: ExtractorConfig(enabled=False))
-    waveshape: ExtractorConfig = Field(default_factory=lambda: ExtractorConfig(enabled=False))
-
-    def __getattr__(self, name: str) -> ExtractorConfig:
-        """Return default ExtractorConfig for dynamic extractor names.
-
-        This allows plugin-registered extractors to be accessed via attribute
-        access even if they're not explicitly defined in the config.
+    def get_extractor_config(self, name: str) -> dict[str, Any]:
+        """Get configuration for an extractor by name.
 
         Args:
             name: Name of the extractor
 
         Returns:
-            Default ExtractorConfig instance
+            Dictionary with extractor config. Returns {"enabled": False}
+            for unknown extractors.
         """
-        # Only handle extractor configs, not other attributes
-        # Check if this is a known Pydantic field first
-        if name in self.model_fields:
-            return super().__getattribute__(name)
-
-        # For dynamic extractors, return a default config
-        # Store it in __dict__ so it persists
-        if name not in self.__dict__:
-            self.__dict__[name] = ExtractorConfig()
-        return self.__dict__[name]
+        return getattr(self, name, {"enabled": False})
 
     @pydantic.model_validator(mode="after")
     def check_any_features(self) -> "FeaturesConfig":
         """Validate that at least one feature extractor is enabled.
 
-        Checks both hardcoded and dynamically added extractor configs.
-
         Raises:
             ValueError: If all feature extractors are disabled
         """
         enabled_extractors = []
-        checked_names = set()
 
-        # Check hardcoded fields
-        for name, field in self.model_fields.items():
-            config = getattr(self, name, None)
-            if isinstance(config, ExtractorConfig) and config.enabled:
+        for name in self.model_fields:
+            config = getattr(self, name, {})
+            if isinstance(config, dict) and config.get("enabled", False):
                 enabled_extractors.append(name)
-            checked_names.add(name)
-
-        # Check dynamic fields from model_dump (includes extra='allow' fields)
-        dumped = self.model_dump()
-        for name, value in dumped.items():
-            if name not in checked_names:
-                # This is a dynamic field
-                if isinstance(value, dict) and value.get("enabled", False):
-                    enabled_extractors.append(name)
-                elif isinstance(value, ExtractorConfig) and value.enabled:
-                    enabled_extractors.append(name)
-                checked_names.add(name)
-
-        # Also check __dict__ for dynamically added configs (fallback)
-        for name, value in self.__dict__.items():
-            if name not in checked_names and isinstance(value, ExtractorConfig):
-                if value.enabled:
-                    enabled_extractors.append(name)
 
         if not enabled_extractors:
             raise ValueError(
@@ -146,16 +93,15 @@ class Settings(BaseModel):
             Default is the standard 12-lead order: ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 
     Examples:
-        # Default settings (all features enabled, standard 12-lead order)
+        # Default settings (morphological enabled, standard 12-lead order)
         settings = Settings()
+
+        # Enable additional extractors
+        settings = Settings()
+        settings.features.statistical = {"enabled": True}
 
         # Custom lead order (e.g., only limb leads)
         settings = Settings(lead_order=["I", "II", "III", "aVR", "aVL", "aVF"])
-
-        # Custom settings with different lead order
-        settings = Settings()
-        settings.features.morphological.features = ["st_elevation", "qtc_interval"]
-        settings.lead_order = ["V1", "V2", "V3", "V4", "V5", "V6"]  # Only precordial leads
     """
 
     preprocessing: PreprocessingSettings = Field(default_factory=PreprocessingSettings)
