@@ -8,6 +8,7 @@ multi-channel ECG data and supports parallel processing for efficient computatio
 from ._logging import logger, set_log_file, set_log_level
 from .config import ConfigLoader, FeaturesConfig, Settings
 from .core import FeatureExtractor, get_features
+from .feature_extractors.morphological import ECGDelineationError, detect_r_peaks, ecg_delineate
 from .feature_extractors.registry import ExtractorRegistry
 from .preprocessing import (
     BandpassArgs,
@@ -26,6 +27,9 @@ __all__ = [
     "set_log_file",
     "get_features",
     "preprocess",
+    "detect_r_peaks",
+    "ecg_delineate",
+    "ECGDelineationError",
     "Settings",
     "PreprocessingSettings",
     "ResampleArgs",

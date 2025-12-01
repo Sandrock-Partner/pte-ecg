@@ -95,11 +95,332 @@ class ECGDelineationError(Exception):
     pass
 
 
-# Module-level helper for multiprocessing (must be at module level for pickling)
-def _starmap_helper_morph(args: tuple) -> dict:
-    """Helper function for multiprocessing morphological feature extraction."""
-    extractor, sample_data, sfreq = args
-    return extractor._process_single_sample(sample_data, sfreq)
+def ecg_delineate(
+    ch_data: np.ndarray,
+    r_peaks: np.ndarray,
+    sfreq: float,
+) -> dict:
+    """Delineate P, Q, S, T waves using neurokit2 with optimized method selection.
+
+    This function uses the same optimized method selection logic as the morphological
+    feature extractor, prioritizing methods based on sampling frequency and reliability.
+
+    Args:
+        ch_data: Single channel ECG data with shape (n_timepoints,)
+        r_peaks: R-peak indices (must be valid, non-empty array)
+        sfreq: Sampling frequency in Hz
+
+    Returns:
+        Dictionary with wave indices for each wave type (ECG_P_Peaks, ECG_Q_Peaks, etc.)
+
+    Raises:
+        ECGDelineationError: If all delineation methods fail
+        ValueError: If r_peaks is empty or None
+
+    Examples:
+        >>> import numpy as np
+        >>> import pte_ecg
+        >>> # Detect R-peaks first
+        >>> r_peaks = np.array([100, 300, 500])
+        >>> # Delineate waves
+        >>> waves = pte_ecg.ecg_delineate(ecg_signal, r_peaks, sfreq=1000)
+        >>> p_peaks = waves["ECG_P_Peaks"]
+        >>> q_peaks = waves["ECG_Q_Peaks"]
+    """
+    if r_peaks is None or len(r_peaks) == 0:
+        raise ValueError("r_peaks must be a non-empty array")
+
+    n_r_peaks = len(r_peaks)
+    waves_dict: dict = {}
+
+    # Optimized method selection based on profiling results:
+    # - prominence is fastest (4x faster than dwt) and most reliable
+    # - cwt performs poorly at low sampling rates (<100 Hz)
+    # - dwt and peak are fallback options
+    if sfreq < 100:
+        # Low sampling rate: skip cwt as it detects significantly fewer features
+        methods = ["prominence", "dwt", "peak"]
+        logger.debug(f"Using low-frequency optimized methods for {sfreq} Hz: {methods}")
+    else:
+        # High sampling rate: use all methods with optimized order
+        methods = ["prominence", "dwt", "cwt", "peak"]
+        logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
+
+    for method in methods:
+        if n_r_peaks < 2 and method in {"prominence", "cwt"}:
+            logger.info(f"Not enough R-peaks ({n_r_peaks}) for {method} method.")
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", nk.misc.NeuroKitWarning)  # type: ignore
+                warnings.simplefilter(
+                    "ignore",
+                    scipy.signal._peak_finding_utils.PeakPropertyWarning,  # type: ignore
+                )
+                _, waves_dict = nk.ecg_delineate(
+                    ch_data,
+                    rpeaks=r_peaks,
+                    sampling_rate=sfreq,
+                    method=method,
+                )
+            logger.debug(f"ECG delineation successful with method: {method}")
+            break
+        except nk.misc.NeuroKitWarning as e:  # type: ignore
+            if "Too few peaks detected" in str(e):
+                logger.warning(f"Peak detection failed with method '{method}': {e}")
+            else:
+                raise
+        except Exception as e:
+            logger.warning(f"Delineation failed with method '{method}': {e}")
+            continue
+
+    if not waves_dict:
+        raise ECGDelineationError("ECG delineation failed with all available methods.")
+
+    return waves_dict
+
+
+def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | None, int, PeakMethod | None]:
+    """Detect R-peaks using multiple methods with automatic fallback.
+
+    Args:
+        ch_data: Single channel ECG data with shape (n_timepoints,)
+        sfreq: Sampling frequency in Hz
+
+    Returns:
+        Tuple of (r_peaks array, number of peaks, method used)
+    """
+    peaks_per_method: dict[PeakMethod, np.ndarray] = {}
+    max_n_peaks = 0
+    for method in _METHODS_FINDPEAKS:
+        _, peaks_info = nk.ecg_peaks(
+            ch_data,
+            sampling_rate=np.rint(sfreq).astype(int) if method in ["zong", "emrich2023"] else sfreq,
+            method=method,
+        )
+        r_peaks: np.ndarray | None = peaks_info["ECG_R_Peaks"]
+        n_r_peaks = len(r_peaks) if r_peaks is not None else 0
+        if not n_r_peaks:
+            logger.debug(f"No R-peaks detected for method '{method}'.")
+            continue
+        max_n_peaks = max(max_n_peaks, n_r_peaks)
+        peaks_per_method[method] = r_peaks
+        if n_r_peaks > 1:  # We need at least 2 R-peaks for some features
+            return r_peaks, n_r_peaks, method
+    if not max_n_peaks:
+        return None, max_n_peaks, None
+    for method, r_peaks in peaks_per_method.items():
+        return r_peaks, max_n_peaks, method  # return first item
+    return None, 0, None
+
+
+def detect_r_peaks(
+    ecg_data: np.ndarray,
+    sfreq: float,
+    mode: Literal["per_channel", "global"] = "per_channel",
+    channel: str | int | None = None,
+    lead_order: list[str] | None = None,
+) -> dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]]:
+    """Detect R-peaks from ECG data with support for per-channel or global detection.
+
+    This function provides a unified API for R-peak detection that supports both
+    per-channel detection (detect peaks independently for each channel) and global
+    detection (detect peaks from one channel and use for all channels).
+
+    Args:
+        ecg_data: ECG data. Can be:
+            - 1D array: Single channel data with shape (n_timepoints,)
+            - 2D array: Multi-channel data with shape (n_channels, n_timepoints)
+        sfreq: Sampling frequency in Hz
+        mode: Detection mode:
+            - "per_channel": Detect peaks independently for each channel
+            - "global": Detect peaks from one channel and use for all channels
+        channel: For global mode, specifies which channel to use:
+            - str: Channel name (e.g., "II", "V1") - must be in lead_order
+            - int: Channel index (0-based)
+            - None: Uses priority list (II, -aVR, aVF, I, aVL, III)
+        lead_order: List of channel names (e.g., ["I", "II", "III", ...]).
+            Required when:
+            - ecg_data is 2D and mode="global" with channel specified as string
+            - ecg_data is 2D and mode="global" with channel=None (for priority list)
+            Optional for per_channel mode, but recommended for consistent naming.
+
+    Returns:
+        Dictionary mapping channel identifier to (r_peaks, n_peaks, method) tuple:
+        - For 1D input: {0: (r_peaks, n_peaks, method)}
+        - For 2D input with per_channel mode: {ch_idx: (r_peaks, n_peaks, method), ...}
+        - For 2D input with global mode: {ch_idx: (same_r_peaks, n_peaks, method), ...}
+        where:
+            - r_peaks: Array of R-peak indices (or None if detection failed)
+            - n_peaks: Number of peaks detected
+            - method: Peak detection method used (or None if failed)
+
+    Raises:
+        ValueError: If inputs are invalid (e.g., wrong dimensions, missing lead_order)
+
+    Examples:
+        >>> import numpy as np
+        >>> import pte_ecg
+        >>>
+        >>> # Single channel detection
+        >>> ecg_1d = np.random.randn(10000)
+        >>> peaks = pte_ecg.detect_r_peaks(ecg_1d, sfreq=1000)
+        >>> r_peaks, n_peaks, method = peaks[0]
+        >>>
+        >>> # Multi-channel per-channel detection
+        >>> ecg_12lead = np.random.randn(12, 10000)
+        >>> lead_names = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
+        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, mode="per_channel", lead_order=lead_names)
+        >>> r_peaks_lead_ii, n_peaks_ii, method_ii = peaks[1]  # Channel 1 is "II"
+        >>>
+        >>> # Global detection from specific channel
+        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, mode="global", channel="II", lead_order=lead_names)
+        >>> # All channels will have the same peaks detected from lead II
+        >>>
+        >>> # Global detection with automatic channel selection
+        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, mode="global", lead_order=lead_names)
+        >>> # Automatically selects best channel from priority list
+    """
+    # Validate input dimensions
+    ecg_data = np.asarray(ecg_data)
+    if ecg_data.ndim == 1:
+        # Single channel: convert to 2D for consistent processing
+        ecg_data = ecg_data[np.newaxis, :]
+        is_single_channel = True
+    elif ecg_data.ndim == 2:
+        is_single_channel = False
+    else:
+        raise ValueError(f"ecg_data must be 1D or 2D, got {ecg_data.ndim}D")
+
+    n_channels, n_timepoints = ecg_data.shape
+
+    # Validate lead_order length matches number of channels
+    if lead_order is not None and len(lead_order) != n_channels:
+        raise ValueError(
+            f"lead_order length ({len(lead_order)}) must match number of channels ({n_channels}). "
+            f"lead_order: {lead_order}"
+        )
+
+    # Check for flat channels
+    flat_chs = np.all(np.isclose(ecg_data, ecg_data[:, 0:1]), axis=1)
+
+    if mode == "global":
+        # Global detection: detect from one channel, use for all
+        global_r_peaks = None
+        global_n_peaks = 0
+        global_method: PeakMethod | None = None
+
+        if channel is None:
+            # Use priority list: II, -aVR, aVF, I, aVL, III
+            if lead_order is None:
+                raise ValueError("lead_order must be provided when mode='global' and channel=None")
+            detection_priority = ["II", "aVR", "aVF", "I", "aVL", "III"]
+
+            for lead_name in detection_priority:
+                if lead_name not in lead_order:
+                    continue
+
+                ch_idx = lead_order.index(lead_name)
+                if ch_idx >= n_channels or flat_chs[ch_idx]:
+                    continue
+
+                ch_data = ecg_data[ch_idx]
+
+                # Invert aVR for detection as the main deflection is negative
+                if lead_name == "aVR":
+                    detection_data = -ch_data
+                else:
+                    detection_data = ch_data
+
+                r_peaks, n_peaks, method = _detect_r_peaks(detection_data, sfreq)
+
+                if n_peaks > 1 and r_peaks is not None:
+                    global_r_peaks = r_peaks
+                    global_n_peaks = n_peaks
+                    global_method = method
+                    logger.debug(f"Using global R-peaks detected from lead {lead_name} ({n_peaks} peaks)")
+                    break
+
+            if global_r_peaks is None:
+                logger.warning("Global peak detection failed on all priority leads. Returning empty results.")
+
+        else:
+            # Use specified channel
+            if isinstance(channel, str):
+                if lead_order is None:
+                    raise ValueError("lead_order must be provided when channel is specified as string")
+                if channel not in lead_order:
+                    raise ValueError(f"Channel '{channel}' not found in lead_order: {lead_order}")
+                ch_idx = lead_order.index(channel)
+            elif isinstance(channel, int):
+                ch_idx = channel
+                if ch_idx < 0 or ch_idx >= n_channels:
+                    raise ValueError(f"Channel index {ch_idx} out of range [0, {n_channels})")
+            else:
+                raise ValueError(f"channel must be str, int, or None, got {type(channel).__name__}")
+
+            if flat_chs[ch_idx]:
+                logger.warning(f"Channel {ch_idx} is a flat line. Cannot detect peaks.")
+            else:
+                ch_data = ecg_data[ch_idx]
+
+                # Invert aVR for detection if specified by name
+                if isinstance(channel, str) and channel == "aVR":
+                    detection_data = -ch_data
+                else:
+                    detection_data = ch_data
+
+                r_peaks, n_peaks, method = _detect_r_peaks(detection_data, sfreq)
+
+                if n_peaks > 0 and r_peaks is not None:
+                    global_r_peaks = r_peaks
+                    global_n_peaks = n_peaks
+                    global_method = method
+                    logger.debug(f"Using global R-peaks detected from channel {ch_idx} ({n_peaks} peaks)")
+
+        # Return same peaks for all channels
+        results: dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]] = {}
+        for ch_idx in range(n_channels):
+            if lead_order and ch_idx < len(lead_order):
+                ch_key: int | str = lead_order[ch_idx]
+            else:
+                ch_key = ch_idx
+
+            if global_r_peaks is not None:
+                results[ch_key] = (global_r_peaks, global_n_peaks, global_method)
+            else:
+                results[ch_key] = (None, 0, None)
+
+        if is_single_channel:
+            return results
+
+        return results
+
+    else:  # mode == "per_channel"
+        # Per-channel detection: detect independently for each channel
+        results: dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]] = {}
+
+        for ch_idx in range(n_channels):
+            if flat_chs[ch_idx]:
+                logger.debug(f"Channel {ch_idx} is a flat line. Skipping peak detection.")
+                ch_key: int | str = lead_order[ch_idx] if (lead_order and ch_idx < len(lead_order)) else ch_idx
+                results[ch_key] = (None, 0, None)
+                continue
+
+            ch_data = ecg_data[ch_idx]
+            r_peaks, n_peaks, method = _detect_r_peaks(ch_data, sfreq)
+
+            if lead_order and ch_idx < len(lead_order):
+                ch_key = lead_order[ch_idx]
+            else:
+                ch_key = ch_idx
+
+            results[ch_key] = (r_peaks, n_peaks, method)
+
+        if is_single_channel:
+            return results
+
+        return results
 
 
 class MorphologicalExtractor(BaseFeatureExtractor):
@@ -366,36 +687,25 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         global_r_peaks = None
         if self.use_global_peaks:
-            # Priority: II, -aVR, aVF, I, aVL, III
-            detection_priority = ["II", "aVR", "aVF", "I", "aVL", "III"]
-            for lead_name in detection_priority:
-                if lead_name not in lead_order:
-                    continue
-
-                ch_idx = lead_order.index(lead_name)
-                # Check bounds and flat line
-                if ch_idx >= len(flat_chs) or flat_chs[ch_idx]:
-                    continue
-
-                ch_data = sample_data[ch_idx]
-
-                # Invert aVR for detection as the main deflection is negative
-                if lead_name == "aVR":
-                    detection_data = -ch_data
+            # Use detect_r_peaks() API for global detection
+            results = detect_r_peaks(
+                sample_data,
+                self.sfreq,
+                mode="global",
+                channel=None,  # Use priority list
+                lead_order=lead_order,
+            )
+            # Extract global peaks from results (all channels have same peaks in global mode)
+            if results:
+                # Get peaks from first channel result
+                first_result = next(iter(results.values()))
+                global_r_peaks, n_peaks, method = first_result
+                if global_r_peaks is not None and n_peaks > 1:
+                    logger.debug(f"Using global R-peaks ({n_peaks} peaks, method: {method})")
                 else:
-                    detection_data = ch_data
-
-                r_peaks, n_peaks, _ = MorphologicalExtractor._detect_r_peaks(detection_data, self.sfreq)
-
-                if n_peaks > 1 and r_peaks is not None:
-                    global_r_peaks = r_peaks
-                    logger.debug(f"Using global R-peaks detected from lead {lead_name} ({n_peaks} peaks)")
-                    break
-
-            if global_r_peaks is None:
-                logger.warning(
-                    "Global peak detection failed on all priority leads. Falling back to per-channel detection."
-                )
+                    logger.warning(
+                        "Global peak detection failed on all priority leads. Falling back to per-channel detection."
+                    )
 
         for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs, strict=True)):
             if is_flat:
@@ -801,54 +1111,18 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         """
         features: dict[str, float] = {}
         if r_peaks is None:
-            r_peaks, n_r_peaks, _ = MorphologicalExtractor._detect_r_peaks(ch_data, sfreq)
+            # Use detect_r_peaks() API for single channel detection
+            results = detect_r_peaks(ch_data, sfreq, mode="per_channel")
+            r_peaks, n_r_peaks, _ = results.get(0, (None, 0, None))
         else:
             n_r_peaks = len(r_peaks)
 
         if not n_r_peaks or r_peaks is None:
             logger.warning("No R-peaks detected. Skipping morphological features.")
             return {}
-        waves_dict: dict = {}
 
-        # Optimized method selection based on profiling results:
-        # - prominence is fastest (4x faster than dwt) and most reliable
-        # - cwt performs poorly at low sampling rates (<100 Hz)
-        # - dwt and peak are fallback options
-        if sfreq < 100:
-            # Low sampling rate: skip cwt as it detects significantly fewer features
-            methods = ["prominence", "dwt", "peak"]
-            logger.debug(f"Using low-frequency optimized methods for {sfreq} Hz: {methods}")
-        else:
-            # High sampling rate: use all methods with optimized order
-            methods = ["prominence", "dwt", "cwt", "peak"]
-            logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
-
-        for method in methods:
-            if n_r_peaks < 2 and method in {"prominence", "cwt"}:
-                logger.info(f"Not enough R-peaks ({n_r_peaks}) for {method} method.")
-                continue
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", nk.misc.NeuroKitWarning)  # type: ignore
-                    warnings.simplefilter(
-                        "ignore",
-                        scipy.signal._peak_finding_utils.PeakPropertyWarning,  # type: ignore
-                    )
-                    _, waves_dict = nk.ecg_delineate(
-                        ch_data,
-                        rpeaks=r_peaks,
-                        sampling_rate=sfreq,
-                        method=method,
-                    )
-                logger.debug(f"ECG delineation successful with method: {method}")
-                break
-            except nk.misc.NeuroKitWarning as e:  # type: ignore
-                if "Too few peaks detected" in str(e):
-                    logger.warning(f"Peak detection failed with method '{method}': {e}")
-                else:
-                    raise
-        if not waves_dict:
-            raise ECGDelineationError("ECG delineation failed with all available methods.")
+        # Use shared delineation function
+        waves_dict = ecg_delineate(ch_data, r_peaks, sfreq)
 
         # Extrahiere Intervalle
         p_peaks = waves_dict["ECG_P_Peaks"]
@@ -1340,40 +1614,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             features["q_to_r_ratio"] = np.nan
 
         return features
-
-    @staticmethod
-    def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | None, int, PeakMethod | None]:
-        """Detect R-peaks using multiple methods with automatic fallback.
-
-        Args:
-            ch_data: Single channel ECG data with shape (n_timepoints,)
-            sfreq: Sampling frequency in Hz
-
-        Returns:
-            Tuple of (r_peaks array, number of peaks, method used)
-        """
-        peaks_per_method: dict[PeakMethod, np.ndarray] = {}
-        max_n_peaks = 0
-        for method in _METHODS_FINDPEAKS:
-            _, peaks_info = nk.ecg_peaks(
-                ch_data,
-                sampling_rate=np.rint(sfreq).astype(int) if method in ["zong", "emrich2023"] else sfreq,
-                method=method,
-            )
-            r_peaks: np.ndarray | None = peaks_info["ECG_R_Peaks"]
-            n_r_peaks = len(r_peaks) if r_peaks is not None else 0
-            if not n_r_peaks:
-                logger.debug(f"No R-peaks detected for method '{method}'.")
-                continue
-            max_n_peaks = max(max_n_peaks, n_r_peaks)
-            peaks_per_method[method] = r_peaks
-            if n_r_peaks > 1:  # We need at least 2 R-peaks for some features
-                return r_peaks, n_r_peaks, method
-        if not max_n_peaks:
-            return None, max_n_peaks, None
-        for method, r_peaks in peaks_per_method.items():
-            return r_peaks, max_n_peaks, method  # return first item
-        return None, 0, None
 
     @staticmethod
     def _calculate_interval_stats(
