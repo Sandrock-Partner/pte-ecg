@@ -23,8 +23,8 @@ from . import utils
 from .base import BaseFeatureExtractor
 
 PeakMethod = Literal[
-    "pantompkins",
     "neurokit",
+    "pantompkins",
     "nabian",
     "slopesumfunction",
     "zong",
@@ -179,7 +179,7 @@ def ecg_delineate(
     ch_data: np.ndarray,
     r_peaks: np.ndarray[tuple[int], np.dtype[np.int32]],
     sfreq: float,
-    j_point_offset_ms: float = 0.0,
+    j_point_offset_ms: float | Literal["auto"] = "auto",
 ) -> Waves:
     """Delineate P, Q, S, T waves using neurokit2 with optimized method selection.
 
@@ -192,7 +192,9 @@ def ecg_delineate(
         sfreq: Sampling frequency in Hz
         j_point_offset_ms: Additional offset in milliseconds to add to R-Offsets (J-points).
             Since neurokit2 often detects R-Offsets slightly before the true J-point,
-            a small positive offset (e.g., 10-20ms) can improve accuracy. Default: 0.0
+            a small positive offset (e.g., 10-20ms) can improve accuracy.
+            If "auto", applies method-specific default offset (20ms for all methods).
+            Default: "auto"
 
     Returns:
         Waves: Pydantic model containing wave indices for each wave type
@@ -206,7 +208,9 @@ def ecg_delineate(
         >>> import pte_ecg
         >>> # Detect R-peaks first
         >>> r_peaks = np.array([100, 300, 500])
-        >>> # Delineate waves with 10ms J-point offset
+        >>> # Delineate waves with automatic J-point offset
+        >>> waves = pte_ecg.ecg_delineate(ecg_signal, r_peaks, sfreq=1000)
+        >>> # Or with custom offset
         >>> waves = pte_ecg.ecg_delineate(ecg_signal, r_peaks, sfreq=1000, j_point_offset_ms=10.0)
         >>> p_peaks = waves.p_peaks
         >>> q_peaks = waves.q_peaks
@@ -216,13 +220,21 @@ def ecg_delineate(
 
     n_r_peaks = len(r_peaks)
     waves_dict: dict = {}
+    used_method: str | None = None
+
+    # Method-specific default offsets (in milliseconds)
+    METHOD_OFFSETS: dict[str, float] = {
+        "prominence": 20.0,
+        "dwt": 20.0,
+        "cwt": 20.0,
+    }
 
     # Optimized method selection based on profiling results:
     # - dwt might be best for detecting on- and offsets of waves
     # - prominence is fastest (4x faster than dwt)
     # - cwt performs poorly at low sampling rates (<100 Hz)
     # - peak is not used as it does not detect most on- and offsets of waves
-    methods = ["dwt", "prominence"]
+    methods = ["prominence", "dwt"]
     if sfreq > 100:
         methods.append("cwt")
     logger.debug(f"Using methods for ECG delineation: {methods}")
@@ -245,6 +257,7 @@ def ecg_delineate(
                     method=method,
                 )
             logger.debug(f"ECG delineation successful with method: {method}")
+            used_method = method
             break
         except nk.misc.NeuroKitWarning as e:  # type: ignore
             if "Too few peaks detected" in str(e):
@@ -258,21 +271,33 @@ def ecg_delineate(
     if not waves_dict:
         raise ECGDelineationError("ECG delineation failed with all available methods.")
 
+    # Determine actual offset to use
+    if j_point_offset_ms == "auto":
+        if used_method and used_method in METHOD_OFFSETS:
+            actual_offset_ms = METHOD_OFFSETS[used_method]
+            logger.debug(f"Using auto J-point offset: {actual_offset_ms}ms for method '{used_method}'")
+        else:
+            # Fallback if method is unknown
+            actual_offset_ms = 20.0
+            logger.debug(f"Using fallback auto J-point offset: {actual_offset_ms}ms")
+    else:
+        actual_offset_ms = j_point_offset_ms
+
     # Calculate J-points from R-Offsets with optional offset
     if "ECG_R_Offsets" in waves_dict:
         r_offsets = waves_dict["ECG_R_Offsets"]
-        if not r_offsets or j_point_offset_ms == 0:
+        if not r_offsets or actual_offset_ms == 0:
             waves_dict["ECG_J_Points"] = r_offsets
         else:
             r_offsets_arr = np.asarray(r_offsets, dtype=float)
-            offset_samples = int(j_point_offset_ms * sfreq / 1000.0)
+            offset_samples = int(actual_offset_ms * sfreq / 1000.0)
             n_samples = len(ch_data)
             # Apply offset only to non-NaN values and clamp to valid range
             valid_mask = ~np.isnan(r_offsets_arr)
             j_points_arr = r_offsets_arr.copy()
             j_points_arr[valid_mask] = np.clip(j_points_arr[valid_mask] + offset_samples, 0, n_samples - 1)
             waves_dict["ECG_J_Points"] = [np.nan if np.isnan(j) else int(j) for j in j_points_arr]
-            logger.debug(f"Applied J-point offset of {j_point_offset_ms}ms ({offset_samples} samples)")
+            logger.debug(f"Applied J-point offset of {actual_offset_ms}ms ({offset_samples} samples)")
     waves_dict["ECG_R_Peaks"] = r_peaks
     return Waves(**waves_dict)
 
@@ -427,7 +452,9 @@ def nk_ecg_delineate(
     elif method in ["cwt", "continuous wavelet transform"]:
         waves = _ecg_delineator_cwt(ecg_cleaned, rpeaks=rpeaks, sampling_rate=sampling_rate)
     elif method in ["dwt", "discrete wavelet transform"]:
-        waves = _dwt_ecg_delineator(ecg_cleaned, rpeaks, sampling_rate=sampling_rate)
+        waves = _dwt_ecg_delineator(
+            ecg_cleaned, rpeaks, sampling_rate=sampling_rate, analysis_sampling_rate=sampling_rate
+        )
     elif method in ["prominence", "peak-prominence", "emrich", "emrich2024"]:
         waves = _prominence_ecg_delineator(ecg_cleaned, rpeaks=rpeaks, sampling_rate=sampling_rate, **kwargs)
 
@@ -526,8 +553,6 @@ def detect_r_peaks(
         >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, lead_order=lead_names)
         >>> r_peaks_lead_ii, n_peaks_ii, method_ii = peaks["II"]
     """
-    # Validate input dimensions
-    ecg_data = np.asarray(ecg_data)
     if ecg_data.ndim == 1:
         # Single channel: convert to 2D for consistent processing
         ecg_data = ecg_data[np.newaxis, :]
@@ -592,7 +617,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         - ST segment: st_level, st_slope
         - T-wave: t_inversion_depth, t_symmetry
         - RR intervals: rr_interval_mean, rr_interval_std, etc.
-        - Advanced: qrs_fragmentation, q_wave_width, pathological_q, qtc_bazett, qtc_fridericia, qt_rr_ratio, etc.
+        - Advanced: qrs_fragmentation, qtc_bazett, qtc_fridericia, qt_rr_ratio, etc.
         - Global (12-lead): qrs_axis, p_axis, territory markers
         - Early MI markers: aVL_t_inversion, precordial_t_imbalance
 
@@ -602,7 +627,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         j_point_offset_ms: Additional offset in milliseconds to add to detected J-points (R-Offsets).
             Since neurokit2 often detects J-points slightly before the true position,
             a small positive offset (e.g., 10-20ms) can improve ST segment measurements.
-            Default: 0.0
+            If "auto", applies method-specific default offset (20ms for all methods).
+            Default: "auto"
 
     Examples:
         # Extract all morphological features
@@ -612,13 +638,15 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
     name = "morphological"
 
-    def __init__(self, parent: FeatureExtractor, n_jobs: int = -1, j_point_offset_ms: float = 0.0):
+    def __init__(self, parent: FeatureExtractor, n_jobs: int = -1, j_point_offset_ms: float | Literal["auto"] = "auto"):
         """Initialize the morphological extractor.
 
         Args:
             parent: Parent FeatureExtractor instance for accessing sfreq, lead_order, etc.
             n_jobs: Number of parallel jobs (-1 for auto)
             j_point_offset_ms: Additional offset in milliseconds to add to detected J-points.
+                If "auto", applies method-specific default offset (20ms for all methods).
+                Default: "auto"
         """
         self.parent = parent
         self.n_jobs = n_jobs
@@ -710,9 +738,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         "rr_interval_sd1_sd2_ratio",
         # Advanced
         "qrs_fragmentation",
-        "pathological_q",
-        "q_width",
-        "q_width_pathological",
         "qt_rr_ratio",
         "pr_rr_ratio",
         "t_qt_ratio",
@@ -1062,9 +1087,9 @@ class MorphologicalExtractor(BaseFeatureExtractor):
     def _calculate_beatwise_baseline(
         ch_data: np.ndarray,
         r_peak_indices: np.ndarray,
-        p_onsets: list[int | float],
-        p_offsets: list[int | float],
-        t_offsets: list[int | float],
+        p_onsets: np.ndarray[tuple[int], np.dtype[np.float64]],
+        p_offsets: np.ndarray[tuple[int], np.dtype[np.float64]],
+        t_offsets: np.ndarray[tuple[int], np.dtype[np.float64]],
         sfreq: float,
         tp_window_ms: float = 80.0,
         pr_window_ms: float = 80.0,
@@ -1093,20 +1118,16 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         window_before_r = int(250 * sfreq / 1000.0)
         window_size = int(80 * sfreq / 1000.0)
 
-        p_onsets_arr = np.asarray(p_onsets)
-        p_offsets_arr = np.asarray(p_offsets)
-        t_offsets_arr = np.asarray(t_offsets)
-
         for i, r_idx in enumerate(r_peak_indices):
             baseline_value = np.nan
 
             if is_tachycardic:
                 baseline_value = MorphologicalExtractor._get_tp_baseline(
-                    r_idx, ch_data, p_onsets_arr, t_offsets_arr, tp_window_samples
+                    r_idx, ch_data, p_onsets, t_offsets, tp_window_samples
                 )
             if np.isnan(baseline_value):
                 baseline_value = MorphologicalExtractor._get_pr_baseline(
-                    r_idx, ch_data, p_offsets_arr, pr_window_samples, margin_before_r
+                    r_idx, ch_data, p_offsets, pr_window_samples, margin_before_r
                 )
             if np.isnan(baseline_value):
                 baseline_value = MorphologicalExtractor._get_r_baseline(r_idx, ch_data, window_before_r, window_size)
@@ -1251,8 +1272,12 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         n_samples = len(ch_data)
 
+        wave_map: dict[WaveName, np.ndarray[tuple[int], np.dtype[np.float64]]] = {
+            wave: waves.get_array(wave) for wave in WAVE_NAMES
+        }
+
         baseline_per_beat = MorphologicalExtractor._calculate_beatwise_baseline(
-            ch_data, r_peaks, p_onsets, p_offsets, t_offsets, sfreq
+            ch_data, r_peaks, wave_map["P_Onsets"], wave_map["P_Offsets"], wave_map["T_Offsets"], sfreq
         )
 
         if not np.all(np.isnan(baseline_per_beat)):
@@ -1261,8 +1286,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             baseline_samples = int(30 * sfreq)
             global_baseline = float(np.nanmedian(ch_data[: min(baseline_samples, n_samples)]))
         features["baseline_median"] = global_baseline
-
-        wave_map = {wave: waves.get_array(wave) for wave in WAVE_NAMES}
 
         # Vectorized interval calculation for all pairs
         for interval_pair in WAVE_INTERVALS:
@@ -1344,7 +1367,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         features["p_amplitude_mean"] = np.nan
         features["p_amplitude_std"] = np.nan
         if n_p_peaks:
-            p_peaks_array = np.asarray(p_peaks)
+            p_peaks_array = wave_map["P_Peaks"]
             valid_mask = ~np.isnan(p_peaks_array)
             if np.any(valid_mask):
                 valid_peaks = p_peaks_array[valid_mask].astype(int)
@@ -1354,10 +1377,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         features["q_amplitude_mean"] = np.nan
         features["q_amplitude_std"] = np.nan
-        features["q_width"] = np.nan
-        features["q_width_pathological"] = np.nan
         if n_q_peaks:
-            q_peaks_array = np.asarray(q_peaks)
+            q_peaks_array = wave_map["Q_Peaks"]
             valid_mask = ~np.isnan(q_peaks_array)
             if np.any(valid_mask):
                 valid_peaks = q_peaks_array[valid_mask].astype(int)
@@ -1365,28 +1386,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["q_amplitude_mean"] = float(np.mean(q_amplitudes))
                 features["q_amplitude_std"] = float(np.std(q_amplitudes)) if len(q_amplitudes) > 1 else 0.0
 
-            # Q wave width (duration from Q onset to Q peak)
-            # Pathological if > 40ms
-            # Note: Q onsets are approximated using R onsets as Q typically starts at QRS onset
-            q_onsets_approx = r_onsets if n_r_onsets > 0 else None
-            if q_onsets_approx is not None and len(q_onsets_approx) > 0:
-                q_widths = []
-                max_index = min(len(q_peaks), len(q_onsets_approx))
-                for q_peak, q_onset in zip(q_peaks[:max_index], q_onsets_approx[:max_index], strict=True):
-                    if np.isnan(q_peak) or np.isnan(q_onset) or q_peak <= q_onset:
-                        continue
-                    q_width_ms = (q_peak - q_onset) / sfreq * 1000
-                    if q_width_ms > 0:
-                        q_widths.append(q_width_ms)
-                if q_widths:
-                    features["q_width"] = float(np.mean(q_widths))
-                    # Pathological Q wave width (>40ms)
-                    features["q_width_pathological"] = 1.0 if np.mean(q_widths) > 40.0 else 0.0
-
         features["r_amplitude_mean"] = np.nan
         features["r_amplitude_std"] = np.nan
         if n_r_peaks:
-            r_peaks_array = np.asarray(r_peaks)
+            r_peaks_array = wave_map["R_Peaks"]
             valid_mask = ~np.isnan(r_peaks_array)
             if np.any(valid_mask):
                 valid_peaks = r_peaks_array[valid_mask].astype(int)
@@ -1439,7 +1442,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         features["s_amplitude_mean"] = np.nan
         features["s_amplitude_std"] = np.nan
         if n_s_peaks:
-            s_peaks_array = np.asarray(s_peaks)
+            s_peaks_array = wave_map["S_Peaks"]
             valid_mask = ~np.isnan(s_peaks_array)
             if np.any(valid_mask):
                 valid_peaks = s_peaks_array[valid_mask].astype(int)
@@ -1450,7 +1453,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         features["j_amplitude_mean"] = np.nan
         features["j_amplitude_std"] = np.nan
         if j_points is not None and len(j_points) > 0:
-            j_points_array = np.asarray(j_points)
+            j_points_array = wave_map["J_Points"]
             valid_mask = ~np.isnan(j_points_array)
             if np.any(valid_mask):
                 valid_j_points = j_points_array[valid_mask].astype(int)
@@ -1490,22 +1493,12 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             if fragmentations:
                 features["qrs_fragmentation"] = float(np.mean(fragmentations))
 
-        # Pathological Q wave detection
-        # Pathological if QRS duration > 40ms AND Q amplitude > 25% of R amplitude
-        features["pathological_q"] = np.nan
-        if "qrs_duration_mean" in features and "q_amplitude_mean" in features and "r_amplitude_mean" in features:
-            qrs_dur = features["qrs_duration_mean"]
-            q_amp = abs(features["q_amplitude_mean"])
-            r_amp = abs(features["r_amplitude_mean"])
-            if qrs_dur > 40 and r_amp > 0 and q_amp > 0.25 * r_amp:
-                features["pathological_q"] = 1.0
-
         # Initialize T wave morphological features
         features["t_amplitude_mean"] = np.nan
         features["t_amplitude_std"] = np.nan
         features["t_inversion_depth"] = np.nan
         if n_t_peaks:
-            t_peaks_array = np.asarray(t_peaks)
+            t_peaks_array = wave_map["T_Peaks"]
             valid_mask = ~np.isnan(t_peaks_array)
             if np.any(valid_mask):
                 valid_peaks = t_peaks_array[valid_mask].astype(int)
@@ -1721,8 +1714,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
     @staticmethod
     def _calculate_interval_stats(
-        peaks1: np.ndarray,
-        peaks2: np.ndarray,
+        peaks1: np.ndarray[tuple[int], np.dtype[np.float64]],
+        peaks2: np.ndarray[tuple[int], np.dtype[np.float64]],
         sfreq: float,
         max_interval_ms: float | None = None,
         min_interval_ms: float | None = None,
@@ -1746,7 +1739,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         Returns:
             Dictionary with mean, median, std in milliseconds, or empty dict if no valid intervals
         """
-        intervals_ms = pair_peaks(peaks1, peaks2, sfreq, max_interval_ms, min_interval_ms)
+        intervals_ms = _pair_peaks(peaks1, peaks2, sfreq, max_interval_ms, min_interval_ms)
 
         if intervals_ms.size == 0:
             return {}
@@ -1758,9 +1751,9 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         }
 
 
-def pair_peaks(
-    peaks1: np.ndarray,
-    peaks2: np.ndarray,
+def _pair_peaks(
+    peaks1: np.ndarray[tuple[int], np.dtype[np.float64]],
+    peaks2: np.ndarray[tuple[int], np.dtype[np.float64]],
     sfreq: float,
     max_interval_ms: float | None = None,
     min_interval_ms: float | None = None,
@@ -1773,17 +1766,13 @@ def pair_peaks(
     Returns:
         interval_ms (1D numpy array; rows with no valid candidate are dropped)
     """
-    # Ensure numpy arrays
-    p1 = np.asarray(peaks1, dtype=float)
-    p2 = np.asarray(peaks2, dtype=float)
-
-    if p1.size == 0 or p2.size == 0:
+    if peaks1.size == 0 or peaks2.size == 0:
         return np.array([])
 
-    mask1 = ~np.isnan(p1)
-    mask2 = ~np.isnan(p2)
-    p1v = p1[mask1]
-    p2v = p2[mask2]
+    mask1 = ~np.isnan(peaks1)
+    mask2 = ~np.isnan(peaks2)
+    p1v = peaks1[mask1]
+    p2v = peaks2[mask2]
 
     if p1v.size == 0 or p2v.size == 0:
         return np.array([])
