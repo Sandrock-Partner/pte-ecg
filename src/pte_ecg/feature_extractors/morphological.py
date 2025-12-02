@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import scipy.signal
 import scipy.stats
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm import tqdm
 
 from .._logging import logger
@@ -24,6 +25,114 @@ from .base import BaseFeatureExtractor
 
 if TYPE_CHECKING:
     from ..core import FeatureExtractor
+
+
+class Waves(BaseModel):
+    """Pydantic model for ECG wave delineation results.
+
+    Contains indices for P, Q, R, S, T wave peaks and their onsets/offsets.
+    All lists have the same length (one entry per detected R-peak/beat).
+    Values can be NaN (represented as float('nan')) when a particular wave
+    feature was not detected for a beat.
+
+    The model accepts both snake_case field names (p_peaks, q_peaks, etc.) and
+    neurokit2-style aliases (ECG_P_Peaks, ECG_Q_Peaks, etc.) for construction.
+
+    Attributes:
+        r_peaks: R-wave peak indices (list of int or float for NaN)
+        p_peaks: P-wave peak indices (list of int or float for NaN)
+        q_peaks: Q-wave peak indices
+        s_peaks: S-wave peak indices
+        t_peaks: T-wave peak indices
+        p_onsets: P-wave onset indices
+        p_offsets: P-wave offset indices
+        r_onsets: R-wave onset (Q-onset) indices
+        r_offsets: R-wave offset indices
+        t_onsets: T-wave onset indices
+        t_offsets: T-wave offset indices
+        j_points: J-point indices (R-offsets with optional offset applied)
+    """
+
+    model_config = ConfigDict(populate_by_name=True, frozen=True)
+
+    r_peaks: list[int | float] = Field(alias="ECG_R_Peaks")
+    p_peaks: list[int | float] = Field(alias="ECG_P_Peaks")
+    q_peaks: list[int | float] = Field(alias="ECG_Q_Peaks")
+    s_peaks: list[int | float] = Field(alias="ECG_S_Peaks")
+    t_peaks: list[int | float] = Field(alias="ECG_T_Peaks")
+    p_onsets: list[int | float] = Field(alias="ECG_P_Onsets")
+    p_offsets: list[int | float] = Field(alias="ECG_P_Offsets")
+    r_onsets: list[int | float] = Field(alias="ECG_R_Onsets")
+    r_offsets: list[int | float] = Field(alias="ECG_R_Offsets")
+    t_onsets: list[int | float] = Field(alias="ECG_T_Onsets")
+    t_offsets: list[int | float] = Field(alias="ECG_T_Offsets")
+    j_points: list[int | float] = Field(alias="ECG_J_Points")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def convert_to_list(cls, v: list | np.ndarray) -> list[int | float]:
+        """Convert input to list, handle NaN as float('nan')."""
+        return [np.nan if np.isnan(x) else int(x) for x in v]
+
+    @model_validator(mode="after")
+    def validate_consistent_lengths(self) -> Waves:
+        """Ensure all wave lists have consistent lengths."""
+        lengths = {name: len(getattr(self, name)) for name in self.model_fields if len(getattr(self, name)) > 0}
+        if lengths:
+            unique_lengths = set(lengths.values())
+            if len(unique_lengths) > 1:
+                raise ValueError(f"Inconsistent wave lengths detected: {lengths}")
+        return self
+
+    @property
+    def n_beats(self) -> int:
+        """Return the number of beats (length of lists)."""
+        for name in self.model_fields:
+            lst = getattr(self, name)
+            if len(lst) > 0:
+                return len(lst)
+        return 0
+
+    def __len__(self) -> int:
+        """Return the number of beats."""
+        return self.n_beats
+
+    def get_array(self, wave_name: str) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
+        """Get wave indices as numpy array for a given wave name.
+
+        This method converts the stored list to a numpy array and caches the result
+        for performance. The cache is invalidated if the model is modified.
+
+        Args:
+            wave_name: Name of the wave (e.g., 'P', 'Q', 'R', 'S', 'T', 'P_onset', etc.)
+
+        Returns:
+            Numpy array of wave indices, empty array if wave not found or empty
+
+        Examples:
+            >>> waves = Waves(...)
+            >>> p_array = waves.get_array('P')
+            >>> r_array = waves.get_array('R')
+        """
+        # Map common names to field names
+        wave_map = {
+            "P": "p_peaks",
+            "Q": "q_peaks",
+            "R": "r_peaks",
+            "S": "s_peaks",
+            "T": "t_peaks",
+            "P_onset": "p_onsets",
+            "P_offset": "p_offsets",
+            "R_onset": "r_onsets",
+            "R_offset": "r_offsets",
+            "T_onset": "t_onsets",
+            "T_offset": "t_offsets",
+            "J": "j_points",
+        }
+
+        field_name = wave_map.get(wave_name, wave_name)
+        wave_list = getattr(self, field_name)
+        return np.array(wave_list, dtype=float)
 
 
 def _safe_nanmean(values: list | np.ndarray) -> float:
@@ -39,8 +148,8 @@ def _safe_nanmean(values: list | np.ndarray) -> float:
 
 # Peak detection methods to try (in order of preference)
 _METHODS_FINDPEAKS = [
-    "neurokit",
     "pantompkins",
+    "neurokit",
     "nabian",
     "slopesumfunction",
     "zong",
@@ -80,7 +189,7 @@ _INTERVAL_PAIRS = [
     ("Q", "S", "qrs_duration", 40, 200),  # QRS duration: typically 60-100ms
     ("R", "S", "rs_interval", 15, 100),  # Part of QRS: typically 40-60ms
     ("S", "T_onset", "st_duration", 40, 200),  # ST segment: typically 80-120ms
-    ("Q", "T", "qt_interval", 200, 600),  # QT interval: typically 300-450ms (HR dependent)
+    ("Q", "T_offset", "qt_interval", 200, 700),  # QT interval: typically 300-450ms (HR dependent)
     ("R", "T_onset", "rt_duration", 100, 400),  # R to T onset: typically 200-300ms
     ("R", "T", "rt_interval", 150, 500),  # R to T peak: typically 250-350ms
     ("P", "T", "pt_interval", 200, 1000),  # P to T: entire cycle minus TP segment
@@ -97,10 +206,10 @@ class ECGDelineationError(Exception):
 
 def ecg_delineate(
     ch_data: np.ndarray,
-    r_peaks: np.ndarray,
+    r_peaks: np.ndarray[tuple[int], np.dtype[np.int32]],
     sfreq: float,
     j_point_offset_ms: float = 0.0,
-) -> dict:
+) -> Waves:
     """Delineate P, Q, S, T waves using neurokit2 with optimized method selection.
 
     This function uses the same optimized method selection logic as the morphological
@@ -115,7 +224,7 @@ def ecg_delineate(
             a small positive offset (e.g., 10-20ms) can improve accuracy. Default: 0.0
 
     Returns:
-        Dictionary with wave indices for each wave type (ECG_P_Peaks, ECG_Q_Peaks, etc.)
+        Waves: Pydantic model containing wave indices for each wave type
 
     Raises:
         ECGDelineationError: If all delineation methods fail
@@ -128,8 +237,8 @@ def ecg_delineate(
         >>> r_peaks = np.array([100, 300, 500])
         >>> # Delineate waves with 10ms J-point offset
         >>> waves = pte_ecg.ecg_delineate(ecg_signal, r_peaks, sfreq=1000, j_point_offset_ms=10.0)
-        >>> p_peaks = waves["ECG_P_Peaks"]
-        >>> q_peaks = waves["ECG_Q_Peaks"]
+        >>> p_peaks = waves.p_peaks
+        >>> q_peaks = waves.q_peaks
     """
     if r_peaks is None or len(r_peaks) == 0:
         raise ValueError("r_peaks must be a non-empty array")
@@ -138,21 +247,18 @@ def ecg_delineate(
     waves_dict: dict = {}
 
     # Optimized method selection based on profiling results:
-    # - prominence is fastest (4x faster than dwt) and most reliable
+    # - dwt might be best for detecting on- and offsets of waves
+    # - prominence is fastest (4x faster than dwt)
     # - cwt performs poorly at low sampling rates (<100 Hz)
-    # - dwt and peak are fallback options
-    if sfreq < 100:
-        # Low sampling rate: skip cwt as it detects significantly fewer features
-        methods = ["prominence", "dwt", "peak"]
-        logger.debug(f"Using low-frequency optimized methods for {sfreq} Hz: {methods}")
-    else:
-        # High sampling rate: use all methods with optimized order
-        methods = ["dwt", "prominence", "cwt", "peak"]
-        logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
+    # - peak is not used as it does not detect most on- and offsets of waves
+    methods = ["dwt", "prominence"]
+    if sfreq > 100:
+        methods.append("cwt")
+    logger.debug(f"Using methods for ECG delineation: {methods}")
 
     for method in methods:
         if n_r_peaks < 2 and method in {"prominence", "cwt"}:
-            logger.info(f"Not enough R-peaks ({n_r_peaks}) for {method} method.")
+            logger.info(f"Not enough R-peaks (got {n_r_peaks}) for {method} method.")
             continue
         try:
             with warnings.catch_warnings():
@@ -161,7 +267,7 @@ def ecg_delineate(
                     "ignore",
                     scipy.signal._peak_finding_utils.PeakPropertyWarning,  # type: ignore
                 )
-                _, waves_dict = nk.ecg_delineate(
+                waves_dict = nk_ecg_delineate(
                     ch_data,
                     rpeaks=r_peaks,
                     sampling_rate=sfreq,
@@ -181,23 +287,197 @@ def ecg_delineate(
     if not waves_dict:
         raise ECGDelineationError("ECG delineation failed with all available methods.")
 
-    # Apply J-point offset to R-Offsets if specified
-    if j_point_offset_ms != 0.0 and "ECG_R_Offsets" in waves_dict:
+    # Calculate J-points from R-Offsets with optional offset
+    if "ECG_R_Offsets" in waves_dict:
         r_offsets = waves_dict["ECG_R_Offsets"]
-        if r_offsets is not None:
+        if not r_offsets or j_point_offset_ms == 0:
+            waves_dict["ECG_J_Points"] = r_offsets
+        else:
+            r_offsets_arr = np.asarray(r_offsets, dtype=float)
             offset_samples = int(j_point_offset_ms * sfreq / 1000.0)
             n_samples = len(ch_data)
-            r_offsets_arr = np.asarray(r_offsets, dtype=float)
             # Apply offset only to non-NaN values and clamp to valid range
             valid_mask = ~np.isnan(r_offsets_arr)
-            r_offsets_arr[valid_mask] = np.clip(r_offsets_arr[valid_mask] + offset_samples, 0, n_samples - 1)
-            waves_dict["ECG_J_Points"] = r_offsets_arr.tolist()
+            j_points_arr = r_offsets_arr.copy()
+            j_points_arr[valid_mask] = np.clip(j_points_arr[valid_mask] + offset_samples, 0, n_samples - 1)
+            waves_dict["ECG_J_Points"] = [np.nan if np.isnan(j) else int(j) for j in j_points_arr]
             logger.debug(f"Applied J-point offset of {j_point_offset_ms}ms ({offset_samples} samples)")
+    waves_dict["ECG_R_Peaks"] = r_peaks
+    return Waves(**waves_dict)
 
-    return waves_dict
+
+def nk_ecg_delineate(
+    ecg_cleaned, rpeaks=None, sampling_rate=1000, method="dwt", show=False, show_type="peaks", check=False, **kwargs
+):
+    """**Delineate QRS complex**(MODIFIED FROM NEUROKIT2 version 0.2.12)
+
+    This function is a modified version of the neurokit2.ecg.ecg_delineate function.
+    It is modified to not remove NaN and None values, and to not return the signals dictionary.
+
+    Function to delineate the QRS complex, i.e., the different waves of the cardiac cycles. A
+    typical ECG heartbeat consists of a P wave, a QRS complex and a T wave. The P wave represents
+    the wave of depolarization that spreads from the SA-node throughout the atria. The QRS complex
+    reflects the rapid depolarization of the right and left ventricles. Since the ventricles are
+    the largest part of the heart, in terms of mass, the QRS complex usually has a much larger
+    amplitude than the P-wave. The T wave represents the ventricular repolarization of the
+    ventricles.On rare occasions, a U wave can be seen following the T wave. The U wave is believed
+    to be related to the last remnants of ventricular repolarization.
+
+    Parameters
+    ----------
+    ecg_cleaned : Union[list, np.array, pd.Series]
+        The cleaned ECG channel as returned by ``ecg_clean()``.
+    rpeaks : Union[list, np.array, pd.Series]
+        The samples at which R-peaks occur. Accessible with the key "ECG_R_Peaks" in the info
+        dictionary returned by ``ecg_findpeaks()``.
+    sampling_rate : int
+        The sampling frequency of ``ecg_signal`` (in Hz, i.e., samples/second). Defaults to 1000.
+    method : str
+        Can be one of ``"peak"`` for a peak-based method, ``"prominence"`` for a peak-prominence-based
+        method (Emrich et al., 2024), ``"cwt"`` for continuous wavelet transform or ``"dwt"`` (default)
+        for discrete wavelet transform.
+        The ``"prominence"`` method might be useful to detect the waves, allowing to set individual physiological
+        limits (see kwargs), while the ``"dwt"`` method might be more precise for detecting the onsets and offsets
+        of the waves (but might exhibit lower accuracy when there is significant variation in wave morphology).
+        The ``"peak"`` method, which uses the zero-crossings of the signal derivatives, works best with very clean signals.
+    show : bool
+        If ``True``, will return a plot to visualizing the delineated waves information.
+    show_type: str
+        The type of delineated waves information showed in the plot.
+        Can be ``"peaks"``, ``"bounds_R"``, ``"bounds_T"``, ``"bounds_P"`` or ``"all"``.
+    check : bool
+        Defaults to ``False``. If ``True``, replaces the delineated features with ``np.nan`` if its
+        standardized distance from R-peaks is more than 3.
+    **kwargs
+        Other optional arguments:
+        If using the ``"prominence"`` method, additional parameters (in milliseconds) can be passed to set
+        individual physiological limits for the search boundaries:
+        - ``max_qrs_interval``: The maximum allowable QRS complex interval. Defaults to 180 ms.
+        - ``max_pr_interval``: The maximum PR interval duration. Defaults to 300 ms.
+        - ``max_r_rise_time``: Maximum duration for the R-wave rise. Defaults to 120 ms.
+        - ``typical_st_segment``: Typical duration of the ST segment. Defaults to 150 ms.
+        - ``max_p_basepoint_interval``: The maximum interval between P-wave on- and offset. Defaults to 100 ms.
+        - ``max_r_basepoint_interval``: The maximum interval between R-wave on- and offset. Defaults to 100 ms.
+        - ``max_t_basepoint_interval``: The maximum interval between T-wave on- and offset. Defaults to 200 ms.
+
+    Returns
+    -------
+    waves : dict
+        A dictionary containing additional information.
+        For derivative method, the dictionary contains the samples at which P-peaks, Q-peaks,
+        S-peaks, T-peaks, P-onsets and T-offsets occur, accessible with the keys ``"ECG_P_Peaks"``,
+        ``"ECG_Q_Peaks"``, ``"ECG_S_Peaks"``, ``"ECG_T_Peaks"``, ``"ECG_P_Onsets"``,
+        ``"ECG_T_Offsets"``, respectively.
+
+        For the wavelet and prominence methods, in addition to the above information, the dictionary contains the
+        samples at which QRS-onsets and QRS-offsets occur, accessible with the key
+        ``"ECG_P_Peaks"``, ``"ECG_T_Peaks"``, ``"ECG_P_Onsets"``, ``"ECG_P_Offsets"``,
+        ``"ECG_Q_Peaks"``, ``"ECG_S_Peaks"``, ``"ECG_T_Onsets"``, ``"ECG_T_Offsets"``,
+        ``"ECG_R_Onsets"``, ``"ECG_R_Offsets"``, respectively.
+
+    See Also
+    --------
+    ecg_clean, .signal_fixpeaks, ecg_peaks, .signal_rate, ecg_process, ecg_plot
+
+    Examples
+    --------
+    * Step 1. Delineate
+
+    .. ipython:: python
+
+      import neurokit2 as nk
+
+      # Simulate ECG signal
+      ecg = nk.ecg_simulate(duration=10, sampling_rate=1000)
+      # Get R-peaks location
+      _, rpeaks = nk.ecg_peaks(ecg, sampling_rate=1000)
+      # Delineate cardiac cycle
+      waves = nk_ecg_delineate(ecg, rpeaks, sampling_rate=1000)
+
+    * Step 2. Plot P-Peaks and T-Peaks
+
+    .. ipython:: python
+
+      @savefig p_ecg_delineate1.png scale=100%
+      nk.events_plot([waves["ECG_P_Peaks"], waves["ECG_T_Peaks"]], ecg)
+      @suppress
+      plt.close()
+
+    References
+    --------------
+    - Martínez, J. P., Almeida, R., Olmos, S., Rocha, A. P., & Laguna, P. (2004). A wavelet-based
+      ECG delineator: evaluation on standard databases. IEEE Transactions on biomedical engineering,
+      51(4), 570-581.
+    - Emrich, J., Gargano, A., Koka, T., & Muma, M. (2024). Physiology-Informed ECG Delineation Based
+      on Peak Prominence. 32nd European Signal Processing Conference (EUSIPCO), 1402-1406.
+
+    """
+    from neurokit2.ecg.ecg_delineate import (
+        _dwt_ecg_delineator,
+        _ecg_delineator_cwt,
+        _ecg_delineator_peak,
+        _prominence_ecg_delineator,
+        ecg_peaks,
+        epochs_to_df,
+    )
+
+    # Sanitize input for ecg_cleaned
+    if isinstance(ecg_cleaned, pd.DataFrame):
+        cols = [col for col in ecg_cleaned.columns if "ECG_Clean" in col]
+        if cols:
+            ecg_cleaned = ecg_cleaned[cols[0]].values
+        else:
+            raise ValueError("NeuroKit error: ecg_delineate(): Wrong input, we couldn't extractcleaned signal.")
+
+    elif isinstance(ecg_cleaned, dict):
+        for i in ecg_cleaned:
+            cols = [col for col in ecg_cleaned[i].columns if "ECG_Clean" in col]
+            if cols:
+                signals = epochs_to_df(ecg_cleaned)
+                ecg_cleaned = signals[cols[0]].values
+
+            else:
+                raise ValueError("NeuroKit error: ecg_delineate(): Wrong input, we couldn't extractcleaned signal.")
+
+    elif isinstance(ecg_cleaned, pd.Series):
+        ecg_cleaned = ecg_cleaned.values
+
+    # Sanitize input for rpeaks
+    if rpeaks is None:
+        _, rpeaks = ecg_peaks(ecg_cleaned, sampling_rate=sampling_rate)
+        rpeaks = rpeaks["ECG_R_Peaks"]
+
+    if isinstance(rpeaks, dict):
+        rpeaks = rpeaks["ECG_R_Peaks"]
+
+    method = method.lower()  # remove capitalised letters
+    if method in ["peak", "peaks", "derivative", "gradient"]:
+        waves = _ecg_delineator_peak(ecg_cleaned, rpeaks=rpeaks, sampling_rate=sampling_rate)
+    elif method in ["cwt", "continuous wavelet transform"]:
+        waves = _ecg_delineator_cwt(ecg_cleaned, rpeaks=rpeaks, sampling_rate=sampling_rate)
+    elif method in ["dwt", "discrete wavelet transform"]:
+        waves = _dwt_ecg_delineator(ecg_cleaned, rpeaks, sampling_rate=sampling_rate)
+    elif method in ["prominence", "peak-prominence", "emrich", "emrich2024"]:
+        waves = _prominence_ecg_delineator(ecg_cleaned, rpeaks=rpeaks, sampling_rate=sampling_rate, **kwargs)
+
+    else:
+        raise ValueError(
+            "NeuroKit error: ecg_delineate(): 'method' should be one of 'peak', 'prominence','cwt' or 'dwt'."
+        )
+
+    for _, value in waves.items():
+        if np.isnan(value[-1]):
+            continue
+        assert value[-1] < len(ecg_cleaned), (
+            f"Wave index {value[-1]} is larger than ECG signal length {len(ecg_cleaned)}"
+        )
+
+    return waves
 
 
-def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | None, int, PeakMethod | None]:
+def _detect_r_peaks(
+    ch_data: np.ndarray, sfreq: float
+) -> tuple[np.ndarray[tuple[int], np.dtype[np.int32]], int, PeakMethod | None]:
     """Detect R-peaks using multiple methods with automatic fallback.
 
     Args:
@@ -216,7 +496,9 @@ def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | Non
             method=method,
         )
         r_peaks: np.ndarray | None = peaks_info["ECG_R_Peaks"]
-        n_r_peaks = len(r_peaks) if r_peaks is not None else 0
+        if r_peaks is None:
+            continue
+        n_r_peaks = len(r_peaks)
         if not n_r_peaks:
             logger.debug(f"No R-peaks detected for method '{method}'.")
             continue
@@ -225,17 +507,17 @@ def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | Non
         if n_r_peaks > 1:  # We need at least 2 R-peaks for some features
             return r_peaks, n_r_peaks, method
     if not max_n_peaks:
-        return None, max_n_peaks, None
+        return np.ndarray([], dtype=np.int32), max_n_peaks, None
     for method, r_peaks in peaks_per_method.items():
         return r_peaks, max_n_peaks, method  # return first item
-    return None, 0, None
+    return np.ndarray([], dtype=np.int32), 0, None
 
 
 def detect_r_peaks(
     ecg_data: np.ndarray,
     sfreq: float,
     lead_order: list[str] | None = None,
-) -> dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]]:
+) -> dict[int | str, tuple[np.ndarray[tuple[int], np.dtype[np.int32]], int, PeakMethod | None]]:
     """Detect R-peaks from ECG data independently for each channel.
 
     Args:
@@ -294,13 +576,13 @@ def detect_r_peaks(
     flat_chs = np.all(np.isclose(ecg_data, ecg_data[:, 0:1]), axis=1)
 
     # Per-channel detection: detect independently for each channel
-    results: dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]] = {}
+    results: dict[int | str, tuple[np.ndarray, int, PeakMethod | None]] = {}
 
     for ch_idx in range(n_channels):
         if flat_chs[ch_idx]:
             logger.debug(f"Channel {ch_idx} is a flat line. Skipping peak detection.")
             ch_key: int | str = lead_order[ch_idx] if (lead_order and ch_idx < len(lead_order)) else ch_idx
-            results[ch_key] = (None, 0, None)
+            results[ch_key] = (np.array([], dtype=np.int32), 0, None)
             continue
 
         ch_data = ecg_data[ch_idx]
@@ -808,10 +1090,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
     @staticmethod
     def _calculate_beatwise_baseline(
         ch_data: np.ndarray,
-        r_peaks: np.ndarray,
-        p_onsets: np.ndarray | None,
-        p_offsets: np.ndarray | None,
-        t_offsets: np.ndarray | None,
+        r_peak_indices: np.ndarray,
+        p_onsets: list[int | float],
+        p_offsets: list[int | float],
+        t_offsets: list[int | float],
         sfreq: float,
         tp_window_ms: float = 80.0,
         pr_window_ms: float = 80.0,
@@ -822,7 +1104,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         Returns:
             Array of baseline values, one per R-peak (NaN if not available)
         """
-        n_beats = len(r_peaks)
+        n_beats = len(r_peak_indices)
         baseline_per_beat = np.full(n_beats, np.nan)
 
         if n_beats == 0:
@@ -830,7 +1112,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         is_tachycardic = False
         if n_beats > 1:
-            rr_intervals = np.diff(r_peaks) / sfreq
+            rr_intervals = np.diff(r_peak_indices) / sfreq
             mean_hr = 60.0 / np.mean(rr_intervals) if np.mean(rr_intervals) > 0 else 0.0
             is_tachycardic = mean_hr > tachycardia_threshold_bpm
 
@@ -840,15 +1122,11 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         window_before_r = int(250 * sfreq / 1000.0)
         window_size = int(80 * sfreq / 1000.0)
 
-        p_onsets_arr = np.asarray(p_onsets) if p_onsets is not None else np.array([])
-        p_offsets_arr = np.asarray(p_offsets) if p_offsets is not None else np.array([])
-        t_offsets_arr = np.asarray(t_offsets) if t_offsets is not None else np.array([])
+        p_onsets_arr = np.asarray(p_onsets)
+        p_offsets_arr = np.asarray(p_offsets)
+        t_offsets_arr = np.asarray(t_offsets)
 
-        for i, r_idx in enumerate(r_peaks):
-            if np.isnan(r_idx):
-                continue
-
-            r_idx = int(r_idx)
+        for i, r_idx in enumerate(r_peak_indices):
             baseline_value = np.nan
 
             if is_tachycardic:
@@ -923,18 +1201,20 @@ class MorphologicalExtractor(BaseFeatureExtractor):
     @staticmethod
     def _get_beat_baseline(
         wave_idx: int,
-        r_peaks: np.ndarray,
+        r_peak_indices: np.ndarray,
         baseline_per_beat: np.ndarray,
         fallback_baseline: float,
     ) -> float:
         """Get baseline for a specific wave by finding associated R-peak."""
         associated_r_idx = None
-        for r_idx in r_peaks:
-            if not np.isnan(r_idx) and wave_idx > r_idx:
+        for r_idx in r_peak_indices:
+            if not np.isnan(r_idx):
+                if wave_idx < r_idx:
+                    break
                 associated_r_idx = int(r_idx)
 
         if associated_r_idx is not None:
-            r_peak_idx_in_array = np.where(r_peaks == associated_r_idx)[0]
+            r_peak_idx_in_array = np.where(r_peak_indices == associated_r_idx)[0]
             if len(r_peak_idx_in_array) > 0 and not np.isnan(baseline_per_beat[r_peak_idx_in_array[0]]):
                 return float(baseline_per_beat[r_peak_idx_in_array[0]])
 
@@ -962,7 +1242,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if r_peaks is None:
             # Use detect_r_peaks() API for single channel detection
             results = detect_r_peaks(ch_data, sfreq)
-            r_peaks, n_r_peaks, _ = results.get(0, (None, 0, None))
+            r_peaks, n_r_peaks, _ = results[0]
         else:
             n_r_peaks = len(r_peaks)
 
@@ -970,28 +1250,33 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             logger.warning("No R-peaks detected. Skipping morphological features.")
             return {}
 
-        # Use shared delineation function
-        waves_dict = ecg_delineate(ch_data, r_peaks, sfreq, j_point_offset_ms=j_point_offset_ms)
+        # Use shared delineation function (returns Waves pydantic model)
+        waves = ecg_delineate(ch_data, r_peaks, sfreq, j_point_offset_ms=j_point_offset_ms)
 
-        # Extrahiere Intervalle
-        p_peaks = waves_dict["ECG_P_Peaks"]
-        q_peaks = waves_dict["ECG_Q_Peaks"]
-        s_peaks = waves_dict["ECG_S_Peaks"]
-        t_peaks = waves_dict["ECG_T_Peaks"]
+        # Extract wave arrays from Waves model
+        p_peaks = waves.p_peaks
+        q_peaks = waves.q_peaks
+        s_peaks = waves.s_peaks
+        t_peaks = waves.t_peaks
 
-        p_onsets = waves_dict["ECG_P_Onsets"]
-        p_offsets = waves_dict["ECG_P_Offsets"]
-        t_onsets = waves_dict["ECG_T_Onsets"]
-        t_offsets = waves_dict["ECG_T_Offsets"]
+        p_onsets = waves.p_onsets
+        p_offsets = waves.p_offsets
+        r_onsets = waves.r_onsets
+        t_onsets = waves.t_onsets
+        t_offsets = waves.t_offsets
 
-        n_p_peaks = len(p_peaks) if p_peaks is not None else 0
-        n_q_peaks = len(q_peaks) if q_peaks is not None else 0
-        n_s_peaks = len(s_peaks) if s_peaks is not None else 0
-        n_t_peaks = len(t_peaks) if t_peaks is not None else 0
-        n_p_onsets = len(p_onsets) if p_onsets is not None else 0
-        n_p_offsets = len(p_offsets) if p_offsets is not None else 0
-        n_t_onsets = len(t_onsets) if t_onsets is not None else 0
-        n_t_offsets = len(t_offsets) if t_offsets is not None else 0
+        j_points = waves.j_points
+
+        n_p_peaks = len(p_peaks)
+        n_q_peaks = len(q_peaks)
+        n_s_peaks = len(s_peaks)
+        n_t_peaks = len(t_peaks)
+        n_r_onsets = len(r_onsets)
+        n_p_onsets = len(p_onsets)
+        n_p_offsets = len(p_offsets)
+        n_t_onsets = len(t_onsets)
+        n_t_offsets = len(t_offsets)
+        n_j_points = len(j_points)
 
         n_samples = len(ch_data)
 
@@ -1006,27 +1291,12 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             global_baseline = float(np.nanmedian(ch_data[: min(baseline_samples, n_samples)]))
         features["baseline_median"] = global_baseline
 
-        # Build wave indices dictionary for vectorized interval calculation
-        wave_indices = {
-            "P": p_peaks if n_p_peaks else np.array([]),
-            "Q": q_peaks if n_q_peaks else np.array([]),
-            "R": r_peaks if n_r_peaks else np.array([]),
-            "S": s_peaks if n_s_peaks else np.array([]),
-            "T": t_peaks if n_t_peaks else np.array([]),
-            "P_onset": p_onsets if n_p_onsets else np.array([]),
-            "P_offset": p_offsets if n_p_offsets else np.array([]),
-            "T_onset": t_onsets if n_t_onsets else np.array([]),
-            "T_offset": t_offsets if n_t_offsets else np.array([]),
-        }
-
         # Vectorized interval calculation for all pairs
         for interval_pair in _INTERVAL_PAIRS:
             wave1, wave2, feature_name, min_interval_ms, max_interval_ms = interval_pair
-            peaks1 = wave_indices.get(wave1)
-            peaks2 = wave_indices.get(wave2)
+            peaks1 = waves.get_array(wave1)
+            peaks2 = waves.get_array(wave2)
 
-            if peaks1 is None or peaks2 is None:
-                continue
             if len(peaks1) == 0 or len(peaks2) == 0:
                 continue
 
@@ -1109,12 +1379,13 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
             # Q wave width (duration from Q onset to Q peak)
             # Pathological if > 40ms
+            # Note: Q onsets are approximated using R onsets as Q typically starts at QRS onset
             features["q_width_pathological"] = 0.0  # Initialize
-            q_onsets = waves_dict.get("ECG_Q_Onsets")
-            if q_onsets is not None and len(q_onsets) > 0:
+            q_onsets_approx = r_onsets if n_r_onsets > 0 else None
+            if q_onsets_approx is not None and len(q_onsets_approx) > 0:
                 q_widths = []
-                max_index = min(len(q_peaks), len(q_onsets))
-                for q_peak, q_onset in zip(q_peaks[:max_index], q_onsets[:max_index], strict=True):
+                max_index = min(len(q_peaks), len(q_onsets_approx))
+                for q_peak, q_onset in zip(q_peaks[:max_index], q_onsets_approx[:max_index], strict=True):
                     if np.isnan(q_peak) or np.isnan(q_onset) or q_peak <= q_onset:
                         continue
                     q_width_ms = (q_peak - q_onset) / sfreq * 1000
@@ -1176,8 +1447,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["s_amplitude_mean"] = float(np.mean(s_amplitudes))
                 features["s_amplitude_std"] = float(np.std(s_amplitudes)) if len(s_amplitudes) > 1 else 0.0
 
-        # J-point amplitude (use ECG_J_Points if available, fallback to ECG_R_Offsets)
-        j_points = waves_dict.get("ECG_J_Points") or waves_dict.get("ECG_R_Offsets")
         if j_points is not None and len(j_points) > 0:
             j_points_array = np.asarray(j_points)
             valid_mask = ~np.isnan(j_points_array)
@@ -1252,9 +1521,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         features["t_biphasic"] = np.nan
         features["t_preterminal_negative"] = np.nan
         features["t_peak_to_end_interval"] = np.nan
-        t_onsets = waves_dict.get("ECG_T_Onsets")
-        t_offsets = waves_dict.get("ECG_T_Offsets")
-        if t_onsets is not None and t_offsets is not None and n_t_peaks:
+        if n_t_onsets > 0 and n_t_offsets > 0 and n_t_peaks:
             symmetry_ratios = []
             biphasic_flags = []
             preterminal_negative_flags = []
@@ -1319,15 +1586,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             st80_levels = []
             st_areas = []
 
-            # Get J-points (prefer ECG_J_Points, fallback to ECG_R_Offsets) and T-onsets from waves_dict
-            j_points = waves_dict.get("ECG_J_Points") or waves_dict.get("ECG_R_Offsets")
-            t_onsets_st = waves_dict.get("ECG_T_Onsets")
-
-            n_j_points = len(j_points) if j_points is not None else 0
-            n_t_onsets_st = len(t_onsets_st) if t_onsets_st is not None else 0
-
             # Determine if we can use J-point based method
-            use_j_point = n_j_points > 0 and n_t_onsets_st > 0
+            use_j_point = n_j_points > 0 and n_t_onsets > 0
 
             for i, s_peak in enumerate(s_peaks):
                 if np.isnan(s_peak):
@@ -1343,15 +1603,9 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 st_end = None
                 j_point_idx = s_idx  # Default to S-peak
 
-                if (
-                    use_j_point
-                    and i < n_j_points
-                    and i < n_t_onsets_st
-                    and j_points is not None
-                    and t_onsets_st is not None
-                ):
+                if use_j_point and i < n_j_points and i < n_t_onsets and j_points is not None and t_onsets is not None:
                     j_point = j_points[i]
-                    t_onset = t_onsets_st[i]
+                    t_onset = t_onsets[i]
 
                     if not np.isnan(j_point) and not np.isnan(t_onset):
                         j_point_idx = int(j_point)
@@ -1393,8 +1647,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
             if st_elevations:
                 features["st_level"] = float(np.mean(st_elevations))
-            else:
-                ...
             if st_slopes:
                 features["st_slope"] = float(np.mean(st_slopes))
             if st60_levels:
@@ -1494,7 +1746,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         Returns:
             Dictionary with mean, median, std in milliseconds, or empty dict if no valid intervals
         """
-        # Use vectorized pair_peaks function for efficient pairing
         intervals_ms = pair_peaks(peaks1, peaks2, sfreq, max_interval_ms, min_interval_ms)
 
         if intervals_ms.size == 0:

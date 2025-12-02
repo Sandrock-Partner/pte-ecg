@@ -169,7 +169,6 @@ def preprocess(
         n_times = new_n_times
 
     if preprocessing.bandpass.enabled:
-        # Apply bandpass filter using scipy
         l_freq = preprocessing.bandpass.l_freq
         h_freq = preprocessing.bandpass.h_freq
 
@@ -179,17 +178,14 @@ def preprocess(
             b, a = signal.butter(4, [l_freq / nyquist, h_freq / nyquist], btype="band")
             logger.info(f"Applying band-pass filter: {l_freq} Hz - {h_freq} Hz")
         elif l_freq is not None:
-            # High-pass filter
-            b, a = signal.butter(4, [l_freq / nyquist, None], btype="high")
+            b, a = signal.butter(4, l_freq / nyquist, btype="high")
             logger.info(f"Applying high-pass filter: {l_freq} Hz")
         elif h_freq is not None:
-            # Low-pass filter
-            b, a = signal.butter(4, [None, h_freq / nyquist], btype="low")
+            b, a = signal.butter(4, h_freq / nyquist, btype="low")
             logger.info(f"Applying low-pass filter: {h_freq} Hz")
         else:
             raise ValueError("If bandpass is enabled, either l_freq or h_freq must be provided")
 
-        # Apply filter to each ECG and channel
         for i in range(n_ecgs):
             for j in range(n_channels):
                 ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
