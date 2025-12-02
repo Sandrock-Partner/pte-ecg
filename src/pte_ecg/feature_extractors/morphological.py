@@ -99,6 +99,7 @@ def ecg_delineate(
     ch_data: np.ndarray,
     r_peaks: np.ndarray,
     sfreq: float,
+    j_point_offset_ms: float = 0.0,
 ) -> dict:
     """Delineate P, Q, S, T waves using neurokit2 with optimized method selection.
 
@@ -109,6 +110,9 @@ def ecg_delineate(
         ch_data: Single channel ECG data with shape (n_timepoints,)
         r_peaks: R-peak indices (must be valid, non-empty array)
         sfreq: Sampling frequency in Hz
+        j_point_offset_ms: Additional offset in milliseconds to add to R-Offsets (J-points).
+            Since neurokit2 often detects R-Offsets slightly before the true J-point,
+            a small positive offset (e.g., 10-20ms) can improve accuracy. Default: 0.0
 
     Returns:
         Dictionary with wave indices for each wave type (ECG_P_Peaks, ECG_Q_Peaks, etc.)
@@ -122,8 +126,8 @@ def ecg_delineate(
         >>> import pte_ecg
         >>> # Detect R-peaks first
         >>> r_peaks = np.array([100, 300, 500])
-        >>> # Delineate waves
-        >>> waves = pte_ecg.ecg_delineate(ecg_signal, r_peaks, sfreq=1000)
+        >>> # Delineate waves with 10ms J-point offset
+        >>> waves = pte_ecg.ecg_delineate(ecg_signal, r_peaks, sfreq=1000, j_point_offset_ms=10.0)
         >>> p_peaks = waves["ECG_P_Peaks"]
         >>> q_peaks = waves["ECG_Q_Peaks"]
     """
@@ -143,7 +147,7 @@ def ecg_delineate(
         logger.debug(f"Using low-frequency optimized methods for {sfreq} Hz: {methods}")
     else:
         # High sampling rate: use all methods with optimized order
-        methods = ["prominence", "dwt", "cwt", "peak"]
+        methods = ["dwt", "prominence", "cwt", "peak"]
         logger.debug(f"Using high-frequency optimized methods for {sfreq} Hz: {methods}")
 
     for method in methods:
@@ -176,6 +180,19 @@ def ecg_delineate(
 
     if not waves_dict:
         raise ECGDelineationError("ECG delineation failed with all available methods.")
+
+    # Apply J-point offset to R-Offsets if specified
+    if j_point_offset_ms != 0.0 and "ECG_R_Offsets" in waves_dict:
+        r_offsets = waves_dict["ECG_R_Offsets"]
+        if r_offsets is not None:
+            offset_samples = int(j_point_offset_ms * sfreq / 1000.0)
+            n_samples = len(ch_data)
+            r_offsets_arr = np.asarray(r_offsets, dtype=float)
+            # Apply offset only to non-NaN values and clamp to valid range
+            valid_mask = ~np.isnan(r_offsets_arr)
+            r_offsets_arr[valid_mask] = np.clip(r_offsets_arr[valid_mask] + offset_samples, 0, n_samples - 1)
+            waves_dict["ECG_J_Points"] = r_offsets_arr.tolist()
+            logger.debug(f"Applied J-point offset of {j_point_offset_ms}ms ({offset_samples} samples)")
 
     return waves_dict
 
@@ -217,46 +234,29 @@ def _detect_r_peaks(ch_data: np.ndarray, sfreq: float) -> tuple[np.ndarray | Non
 def detect_r_peaks(
     ecg_data: np.ndarray,
     sfreq: float,
-    mode: Literal["per_channel", "global"] = "per_channel",
-    channel: str | int | None = None,
     lead_order: list[str] | None = None,
 ) -> dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]]:
-    """Detect R-peaks from ECG data with support for per-channel or global detection.
-
-    This function provides a unified API for R-peak detection that supports both
-    per-channel detection (detect peaks independently for each channel) and global
-    detection (detect peaks from one channel and use for all channels).
+    """Detect R-peaks from ECG data independently for each channel.
 
     Args:
         ecg_data: ECG data. Can be:
             - 1D array: Single channel data with shape (n_timepoints,)
             - 2D array: Multi-channel data with shape (n_channels, n_timepoints)
         sfreq: Sampling frequency in Hz
-        mode: Detection mode:
-            - "per_channel": Detect peaks independently for each channel
-            - "global": Detect peaks from one channel and use for all channels
-        channel: For global mode, specifies which channel to use:
-            - str: Channel name (e.g., "II", "V1") - must be in lead_order
-            - int: Channel index (0-based)
-            - None: Uses priority list (II, -aVR, aVF, I, aVL, III)
         lead_order: List of channel names (e.g., ["I", "II", "III", ...]).
-            Required when:
-            - ecg_data is 2D and mode="global" with channel specified as string
-            - ecg_data is 2D and mode="global" with channel=None (for priority list)
-            Optional for per_channel mode, but recommended for consistent naming.
+            Optional, but recommended for consistent naming of results.
 
     Returns:
         Dictionary mapping channel identifier to (r_peaks, n_peaks, method) tuple:
         - For 1D input: {0: (r_peaks, n_peaks, method)}
-        - For 2D input with per_channel mode: {ch_idx: (r_peaks, n_peaks, method), ...}
-        - For 2D input with global mode: {ch_idx: (same_r_peaks, n_peaks, method), ...}
+        - For 2D input: {ch_idx: (r_peaks, n_peaks, method), ...}
         where:
             - r_peaks: Array of R-peak indices (or None if detection failed)
             - n_peaks: Number of peaks detected
             - method: Peak detection method used (or None if failed)
 
     Raises:
-        ValueError: If inputs are invalid (e.g., wrong dimensions, missing lead_order)
+        ValueError: If inputs are invalid (e.g., wrong dimensions, mismatched lead_order)
 
     Examples:
         >>> import numpy as np
@@ -267,29 +267,18 @@ def detect_r_peaks(
         >>> peaks = pte_ecg.detect_r_peaks(ecg_1d, sfreq=1000)
         >>> r_peaks, n_peaks, method = peaks[0]
         >>>
-        >>> # Multi-channel per-channel detection
+        >>> # Multi-channel detection
         >>> ecg_12lead = np.random.randn(12, 10000)
         >>> lead_names = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
-        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, mode="per_channel", lead_order=lead_names)
-        >>> r_peaks_lead_ii, n_peaks_ii, method_ii = peaks[1]  # Channel 1 is "II"
-        >>>
-        >>> # Global detection from specific channel
-        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, mode="global", channel="II", lead_order=lead_names)
-        >>> # All channels will have the same peaks detected from lead II
-        >>>
-        >>> # Global detection with automatic channel selection
-        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, mode="global", lead_order=lead_names)
-        >>> # Automatically selects best channel from priority list
+        >>> peaks = pte_ecg.detect_r_peaks(ecg_12lead, sfreq=1000, lead_order=lead_names)
+        >>> r_peaks_lead_ii, n_peaks_ii, method_ii = peaks["II"]
     """
     # Validate input dimensions
     ecg_data = np.asarray(ecg_data)
     if ecg_data.ndim == 1:
         # Single channel: convert to 2D for consistent processing
         ecg_data = ecg_data[np.newaxis, :]
-        is_single_channel = True
-    elif ecg_data.ndim == 2:
-        is_single_channel = False
-    else:
+    elif ecg_data.ndim != 2:
         raise ValueError(f"ecg_data must be 1D or 2D, got {ecg_data.ndim}D")
 
     n_channels, n_timepoints = ecg_data.shape
@@ -304,123 +293,27 @@ def detect_r_peaks(
     # Check for flat channels
     flat_chs = np.all(np.isclose(ecg_data, ecg_data[:, 0:1]), axis=1)
 
-    if mode == "global":
-        # Global detection: detect from one channel, use for all
-        global_r_peaks = None
-        global_n_peaks = 0
-        global_method: PeakMethod | None = None
+    # Per-channel detection: detect independently for each channel
+    results: dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]] = {}
 
-        if channel is None:
-            # Use priority list: II, -aVR, aVF, I, aVL, III
-            if lead_order is None:
-                raise ValueError("lead_order must be provided when mode='global' and channel=None")
-            detection_priority = ["II", "aVR", "aVF", "I", "aVL", "III"]
+    for ch_idx in range(n_channels):
+        if flat_chs[ch_idx]:
+            logger.debug(f"Channel {ch_idx} is a flat line. Skipping peak detection.")
+            ch_key: int | str = lead_order[ch_idx] if (lead_order and ch_idx < len(lead_order)) else ch_idx
+            results[ch_key] = (None, 0, None)
+            continue
 
-            for lead_name in detection_priority:
-                if lead_name not in lead_order:
-                    continue
+        ch_data = ecg_data[ch_idx]
+        r_peaks, n_peaks, method = _detect_r_peaks(ch_data, sfreq)
 
-                ch_idx = lead_order.index(lead_name)
-                if ch_idx >= n_channels or flat_chs[ch_idx]:
-                    continue
-
-                ch_data = ecg_data[ch_idx]
-
-                # Invert aVR for detection as the main deflection is negative
-                if lead_name == "aVR":
-                    detection_data = -ch_data
-                else:
-                    detection_data = ch_data
-
-                r_peaks, n_peaks, method = _detect_r_peaks(detection_data, sfreq)
-
-                if n_peaks > 1 and r_peaks is not None:
-                    global_r_peaks = r_peaks
-                    global_n_peaks = n_peaks
-                    global_method = method
-                    logger.debug(f"Using global R-peaks detected from lead {lead_name} ({n_peaks} peaks)")
-                    break
-
-            if global_r_peaks is None:
-                logger.warning("Global peak detection failed on all priority leads. Returning empty results.")
-
+        if lead_order and ch_idx < len(lead_order):
+            ch_key = lead_order[ch_idx]
         else:
-            # Use specified channel
-            if isinstance(channel, str):
-                if lead_order is None:
-                    raise ValueError("lead_order must be provided when channel is specified as string")
-                if channel not in lead_order:
-                    raise ValueError(f"Channel '{channel}' not found in lead_order: {lead_order}")
-                ch_idx = lead_order.index(channel)
-            elif isinstance(channel, int):
-                ch_idx = channel
-                if ch_idx < 0 or ch_idx >= n_channels:
-                    raise ValueError(f"Channel index {ch_idx} out of range [0, {n_channels})")
-            else:
-                raise ValueError(f"channel must be str, int, or None, got {type(channel).__name__}")
+            ch_key = ch_idx
 
-            if flat_chs[ch_idx]:
-                logger.warning(f"Channel {ch_idx} is a flat line. Cannot detect peaks.")
-            else:
-                ch_data = ecg_data[ch_idx]
+        results[ch_key] = (r_peaks, n_peaks, method)
 
-                # Invert aVR for detection if specified by name
-                if isinstance(channel, str) and channel == "aVR":
-                    detection_data = -ch_data
-                else:
-                    detection_data = ch_data
-
-                r_peaks, n_peaks, method = _detect_r_peaks(detection_data, sfreq)
-
-                if n_peaks > 0 and r_peaks is not None:
-                    global_r_peaks = r_peaks
-                    global_n_peaks = n_peaks
-                    global_method = method
-                    logger.debug(f"Using global R-peaks detected from channel {ch_idx} ({n_peaks} peaks)")
-
-        # Return same peaks for all channels
-        results: dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]] = {}
-        for ch_idx in range(n_channels):
-            if lead_order and ch_idx < len(lead_order):
-                ch_key: int | str = lead_order[ch_idx]
-            else:
-                ch_key = ch_idx
-
-            if global_r_peaks is not None:
-                results[ch_key] = (global_r_peaks, global_n_peaks, global_method)
-            else:
-                results[ch_key] = (None, 0, None)
-
-        if is_single_channel:
-            return results
-
-        return results
-
-    else:  # mode == "per_channel"
-        # Per-channel detection: detect independently for each channel
-        results: dict[int | str, tuple[np.ndarray | None, int, PeakMethod | None]] = {}
-
-        for ch_idx in range(n_channels):
-            if flat_chs[ch_idx]:
-                logger.debug(f"Channel {ch_idx} is a flat line. Skipping peak detection.")
-                ch_key: int | str = lead_order[ch_idx] if (lead_order and ch_idx < len(lead_order)) else ch_idx
-                results[ch_key] = (None, 0, None)
-                continue
-
-            ch_data = ecg_data[ch_idx]
-            r_peaks, n_peaks, method = _detect_r_peaks(ch_data, sfreq)
-
-            if lead_order and ch_idx < len(lead_order):
-                ch_key = lead_order[ch_idx]
-            else:
-                ch_key = ch_idx
-
-            results[ch_key] = (r_peaks, n_peaks, method)
-
-        if is_single_channel:
-            return results
-
-        return results
+    return results
 
 
 class MorphologicalExtractor(BaseFeatureExtractor):
@@ -453,8 +346,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
     Args:
         selected_features: List of features to extract (not yet implemented for filtering)
         n_jobs: Number of parallel jobs
-        use_global_peaks: Whether to use global peak detection (detect peaks on one best channel
-            and use for all channels) instead of per-channel detection. Priority: II, -aVR, aVF, I, aVL, III.
+        j_point_offset_ms: Additional offset in milliseconds to add to detected J-points (R-Offsets).
+            Since neurokit2 often detects J-points slightly before the true position,
+            a small positive offset (e.g., 10-20ms) can improve ST segment measurements.
+            Default: 0.0
 
     Examples:
         # Extract all morphological features
@@ -464,19 +359,17 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
     name = "morphological"
 
-    # Class-level configuration (can be overridden in subclasses or settings)
-    use_global_peaks: bool = False
-
-    def __init__(self, parent: FeatureExtractor, n_jobs: int = -1, use_global_peaks: bool = False):
+    def __init__(self, parent: FeatureExtractor, n_jobs: int = -1, j_point_offset_ms: float = 0.0):
         """Initialize the morphological extractor.
 
         Args:
             parent: Parent FeatureExtractor instance for accessing sfreq, lead_order, etc.
-            **kwargs: Additional config parameters (features, n_jobs, etc.)
+            n_jobs: Number of parallel jobs (-1 for auto)
+            j_point_offset_ms: Additional offset in milliseconds to add to detected J-points.
         """
         self.parent = parent
         self.n_jobs = n_jobs
-        self.use_global_peaks = use_global_peaks
+        self.j_point_offset_ms = j_point_offset_ms
 
     available_features = [
         # Interval means
@@ -506,16 +399,16 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         "pt_interval_median",
         "qt_interval_median",
         # Interval std deviations
+        "p_duration_std",
         "qrs_duration_std",
+        "t_duration_std",
+        "st_duration_std",
+        "rt_duration_std",
         "qt_interval_std",
         "pq_interval_std",
         "pr_interval_std",
         "qr_interval_std",
         "rs_interval_std",
-        "p_duration_std",
-        "t_duration_std",
-        "st_duration_std",
-        "rt_duration_std",
         "rt_interval_std",
         "pt_interval_std",
         # Amplitudes (mean)
@@ -543,13 +436,15 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         "st_level",
         "st_area",
         "st_slope",
-        "st60_amplitude",
-        "st80_amplitude",
+        "st60_level",
+        "st80_level",
+        "baseline_median",
         # T-wave analysis
         "t_inversion_depth",
         "t_symmetry",
-        "biphasic_t",
-        "tpeak_tend_interval",
+        "t_biphasic",
+        "t_preterminal_negative",
+        "t_peak_to_end_interval",
         # RR intervals
         "rr_interval_mean",
         "rr_interval_std",
@@ -618,9 +513,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         "precordial_t_imbalance",
         "precordial_t_max_min_ratio",
         "precordial_t_imbalance_ratio",
-        # T wave morphological features
-        "preterminal_negative_t",
-        "wellens_sign_v2_v3",
     ]
 
     def get_features(self, ecg: np.ndarray) -> pd.DataFrame:
@@ -685,34 +577,14 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             logger.warning("All channels are flat lines. Skipping morphological features.")
             return features
 
-        global_r_peaks = None
-        if self.use_global_peaks:
-            # Use detect_r_peaks() API for global detection
-            results = detect_r_peaks(
-                sample_data,
-                self.sfreq,
-                mode="global",
-                channel=None,  # Use priority list
-                lead_order=lead_order,
-            )
-            # Extract global peaks from results (all channels have same peaks in global mode)
-            if results:
-                # Get peaks from first channel result
-                first_result = next(iter(results.values()))
-                global_r_peaks, n_peaks, method = first_result
-                if global_r_peaks is not None and n_peaks > 1:
-                    logger.debug(f"Using global R-peaks ({n_peaks} peaks, method: {method})")
-                else:
-                    logger.warning(
-                        "Global peak detection failed on all priority leads. Falling back to per-channel detection."
-                    )
-
         for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs, strict=True)):
             if is_flat:
                 lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
                 logger.warning(f"Channel {ch_num} ({lead_name}) is a flat line. Skipping morphological features.")
                 continue
-            ch_feat = MorphologicalExtractor._process_single_channel(ch_data, self.sfreq, r_peaks=global_r_peaks)
+            ch_feat = MorphologicalExtractor._process_single_channel(
+                ch_data, self.sfreq, r_peaks=None, j_point_offset_ms=self.j_point_offset_ms
+            )
             lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
             features.update((f"morphological_{key}_{lead_name}", value) for key, value in ch_feat.items())
 
@@ -867,7 +739,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             if r_amp is not None:
                 r_amplitudes.append(r_amp)
 
-        # Calculate progression score (should increase from V1 to V4-V5)
+        # Calculate progression score (should increase from V1 to V4-V6)
         if len(r_amplitudes) >= 4:
             # Check if there's normal progression
             progression = np.diff(r_amplitudes[:4])
@@ -875,31 +747,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             features["morphological_r_progression"] = progression_score
         else:
             features["morphological_r_progression"] = np.nan
-
-        # ====================================================================
-        # WELLENS SIGN (Biphasic T waves in V2-V3)
-        # ====================================================================
-        # Wellens sign: Biphasic or deeply inverted T waves in V2 and/or V3
-        # Indicative of critical LAD stenosis, typically seen without ST elevation
-        # Criteria: Biphasic T wave (positive then negative) OR deeply inverted T in V2-V3
-        wellens_v2 = 0.0
-        wellens_v3 = 0.0
-        if "V2" in lead_order:
-            biphasic_v2 = features.get("morphological_biphasic_t_V2")
-            t_inv_v2 = features.get("morphological_t_inversion_depth_V2")
-            # Wellens sign: biphasic T OR deeply inverted T (>0.1 mV) in V2
-            if (biphasic_v2 is not None and biphasic_v2 > 0.5) or (t_inv_v2 is not None and t_inv_v2 > 0.1):
-                wellens_v2 = 1.0
-        if "V3" in lead_order:
-            biphasic_v3 = features.get("morphological_biphasic_t_V3")
-            t_inv_v3 = features.get("morphological_t_inversion_depth_V3")
-            # Wellens sign: biphasic T OR deeply inverted T (>0.1 mV) in V3
-            if (biphasic_v3 is not None and biphasic_v3 > 0.5) or (t_inv_v3 is not None and t_inv_v3 > 0.1):
-                wellens_v3 = 1.0
-
-        # Wellens sign is positive if present in V2 OR V3
-        if "V2" in lead_order or "V3" in lead_order:
-            features["morphological_wellens_sign_v2_v3"] = float(max(wellens_v2, wellens_v3))
 
         return features
 
@@ -1098,6 +945,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         ch_data: np.ndarray,
         sfreq: float,
         r_peaks: np.ndarray | None = None,
+        j_point_offset_ms: float = 0.0,
     ) -> dict[str, float]:
         """Static method for processing a single channel (multiprocessing compatible).
 
@@ -1105,6 +953,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             ch_data: Single channel ECG data with shape (n_timepoints,)
             sfreq: Sampling frequency in Hz
             r_peaks: Optional pre-detected R-peaks. If None, peaks are detected from ch_data.
+            j_point_offset_ms: Additional offset in milliseconds to add to detected J-points.
 
         Returns:
             Dictionary of morphological features
@@ -1112,7 +961,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         features: dict[str, float] = {}
         if r_peaks is None:
             # Use detect_r_peaks() API for single channel detection
-            results = detect_r_peaks(ch_data, sfreq, mode="per_channel")
+            results = detect_r_peaks(ch_data, sfreq)
             r_peaks, n_r_peaks, _ = results.get(0, (None, 0, None))
         else:
             n_r_peaks = len(r_peaks)
@@ -1122,7 +971,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             return {}
 
         # Use shared delineation function
-        waves_dict = ecg_delineate(ch_data, r_peaks, sfreq)
+        waves_dict = ecg_delineate(ch_data, r_peaks, sfreq, j_point_offset_ms=j_point_offset_ms)
 
         # Extrahiere Intervalle
         p_peaks = waves_dict["ECG_P_Peaks"]
@@ -1144,6 +993,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         n_t_onsets = len(t_onsets) if t_onsets is not None else 0
         n_t_offsets = len(t_offsets) if t_offsets is not None else 0
 
+        n_samples = len(ch_data)
+
         baseline_per_beat = MorphologicalExtractor._calculate_beatwise_baseline(
             ch_data, r_peaks, p_onsets, p_offsets, t_offsets, sfreq
         )
@@ -1152,7 +1003,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             global_baseline = float(np.nanmedian(baseline_per_beat))
         else:
             baseline_samples = int(30 * sfreq)
-            global_baseline = float(np.nanmedian(ch_data[: min(baseline_samples, len(ch_data))]))
+            global_baseline = float(np.nanmedian(ch_data[: min(baseline_samples, n_samples)]))
+        features["baseline_median"] = global_baseline
 
         # Build wave indices dictionary for vectorized interval calculation
         wave_indices = {
@@ -1285,11 +1137,11 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         if n_r_peaks > 1 and r_peaks is not None:
             rr_intervals = np.diff(r_peaks) / sfreq
             rr_intervals = rr_intervals[~np.isnan(rr_intervals)]
-            mean_rr = float(np.mean(rr_intervals))
-            std_rr = float(np.std(rr_intervals))
-            features["rr_interval_mean"] = mean_rr
-            features["rr_interval_std"] = std_rr
             if len(rr_intervals) > 1:
+                mean_rr = float(np.mean(rr_intervals))
+                std_rr = float(np.std(rr_intervals))
+                features["rr_interval_mean"] = mean_rr
+                features["rr_interval_std"] = std_rr
                 features["rr_interval_median"] = float(np.median(rr_intervals))
                 features["rr_interval_iqr"] = float(np.percentile(rr_intervals, 75) - np.percentile(rr_intervals, 25))
                 cv = std_rr / (abs(mean_rr) + utils.EPS)
@@ -1324,23 +1176,23 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["s_amplitude_mean"] = float(np.mean(s_amplitudes))
                 features["s_amplitude_std"] = float(np.std(s_amplitudes)) if len(s_amplitudes) > 1 else 0.0
 
-        # J-point amplitude (R-offset amplitude)
-        r_offsets = waves_dict.get("ECG_R_Offsets")
-        if r_offsets is not None and len(r_offsets) > 0:
-            r_offsets_array = np.asarray(r_offsets)
-            valid_mask = ~np.isnan(r_offsets_array)
+        # J-point amplitude (use ECG_J_Points if available, fallback to ECG_R_Offsets)
+        j_points = waves_dict.get("ECG_J_Points") or waves_dict.get("ECG_R_Offsets")
+        if j_points is not None and len(j_points) > 0:
+            j_points_array = np.asarray(j_points)
+            valid_mask = ~np.isnan(j_points_array)
             if np.any(valid_mask):
-                valid_offsets = r_offsets_array[valid_mask].astype(int)
+                valid_j_points = j_points_array[valid_mask].astype(int)
                 # Ensure indices are within bounds
-                valid_offsets = valid_offsets[valid_offsets < len(ch_data)]
-                if len(valid_offsets) > 0:
+                valid_j_points = valid_j_points[valid_j_points < n_samples]
+                if len(valid_j_points) > 0:
                     # Calculate j-point amplitude relative to baseline
                     j_amplitudes = []
-                    for r_offset_idx in valid_offsets:
+                    for j_point_idx in valid_j_points:
                         beat_baseline = MorphologicalExtractor._get_beat_baseline(
-                            r_offset_idx, r_peaks, baseline_per_beat, global_baseline
+                            j_point_idx, r_peaks, baseline_per_beat, global_baseline
                         )
-                        j_amp = ch_data[r_offset_idx] - beat_baseline
+                        j_amp = ch_data[j_point_idx] - beat_baseline
                         j_amplitudes.append(j_amp)
                     if j_amplitudes:
                         features["j_amplitude_mean"] = float(np.mean(j_amplitudes))
@@ -1396,17 +1248,17 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                     features["t_inversion_depth"] = np.nan
 
         # T-wave symmetry (ratio of ascending to descending limb duration)
-        features["t_symmetry"] = 1.0
-        features["biphasic_t"] = 0.0
-        features["preterminal_negative_t"] = 0.0
-        features["tpeak_tend_interval"] = np.nan
+        features["t_symmetry"] = np.nan
+        features["t_biphasic"] = np.nan
+        features["t_preterminal_negative"] = np.nan
+        features["t_peak_to_end_interval"] = np.nan
         t_onsets = waves_dict.get("ECG_T_Onsets")
         t_offsets = waves_dict.get("ECG_T_Offsets")
         if t_onsets is not None and t_offsets is not None and n_t_peaks:
             symmetry_ratios = []
             biphasic_flags = []
             preterminal_negative_flags = []
-            tpeak_tend_intervals = []
+            t_peak_to_end_intervals = []
 
             for onset, peak, offset in zip(t_onsets, t_peaks, t_offsets, strict=True):
                 if np.isnan(onset) or np.isnan(peak) or np.isnan(offset):
@@ -1422,16 +1274,16 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 symmetry_ratios.append(ratio)
 
                 tpeak_tend = (offset - peak) / sfreq * 1000
-                tpeak_tend_intervals.append(tpeak_tend)
+                t_peak_to_end_intervals.append(tpeak_tend)
 
                 t_start = max(int(onset), 0)
-                t_end = min(int(offset), len(ch_data))
+                t_end = min(int(offset), n_samples)
                 if t_end <= t_start:
                     continue
 
                 t_segment = ch_data[t_start:t_end]
-                has_positive = np.any(t_segment > 0.1)
-                has_negative = np.any(t_segment < -0.1)
+                has_positive = np.any(t_segment > 0.0)
+                has_negative = np.any(t_segment < 0.0)
                 biphasic_flags.append(1.0 if (has_positive and has_negative) else 0.0)
 
                 beat_baseline = MorphologicalExtractor._get_beat_baseline(
@@ -1441,7 +1293,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 t_duration = t_end - t_start
                 terminal_start = int(t_start + 0.6 * t_duration)
                 terminal_end = t_end
-                if terminal_end <= terminal_start or terminal_start >= len(ch_data):
+                if terminal_end <= terminal_start or terminal_start >= n_samples:
                     continue
 
                 terminal_segment = ch_data[terminal_start:terminal_end]
@@ -1451,31 +1303,31 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
             if symmetry_ratios:
                 features["t_symmetry"] = float(np.mean(symmetry_ratios))
-            if tpeak_tend_intervals:
-                features["tpeak_tend_interval"] = float(np.mean(tpeak_tend_intervals))
+            if t_peak_to_end_intervals:
+                features["t_peak_to_end_interval"] = float(np.mean(t_peak_to_end_intervals))
             if biphasic_flags:
-                features["biphasic_t"] = float(np.mean(biphasic_flags))
+                features["t_biphasic"] = float(np.mean(biphasic_flags))
             if preterminal_negative_flags:
-                features["preterminal_negative_t"] = float(np.mean(preterminal_negative_flags))
+                features["t_preterminal_negative"] = float(np.mean(preterminal_negative_flags))
 
         # ST Segment Features
         # Use R-offset (J-point) and T-onset when available, otherwise fall back to S-peak based method
         if n_s_peaks and r_peaks is not None:
             st_elevations = []
             st_slopes = []
-            st60_amplitudes = []
-            st80_amplitudes = []
+            st60_levels = []
+            st80_levels = []
             st_areas = []
 
-            # Get R-offsets (J-points) and T-onsets from waves_dict
-            r_offsets = waves_dict.get("ECG_R_Offsets")
+            # Get J-points (prefer ECG_J_Points, fallback to ECG_R_Offsets) and T-onsets from waves_dict
+            j_points = waves_dict.get("ECG_J_Points") or waves_dict.get("ECG_R_Offsets")
             t_onsets_st = waves_dict.get("ECG_T_Onsets")
 
-            n_r_offsets = len(r_offsets) if r_offsets is not None else 0
+            n_j_points = len(j_points) if j_points is not None else 0
             n_t_onsets_st = len(t_onsets_st) if t_onsets_st is not None else 0
 
-            # Determine if we can use R-offset based method
-            use_r_offset = n_r_offsets > 0 and n_t_onsets_st > 0
+            # Determine if we can use J-point based method
+            use_j_point = n_j_points > 0 and n_t_onsets_st > 0
 
             for i, s_peak in enumerate(s_peaks):
                 if np.isnan(s_peak):
@@ -1486,38 +1338,38 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                     s_idx, r_peaks, baseline_per_beat, global_baseline
                 )
 
-                # Try to use R-offset (J-point) based method first
+                # Try to use J-point based method first
                 st_start = None
                 st_end = None
                 j_point_idx = s_idx  # Default to S-peak
 
                 if (
-                    use_r_offset
-                    and i < n_r_offsets
+                    use_j_point
+                    and i < n_j_points
                     and i < n_t_onsets_st
-                    and r_offsets is not None
+                    and j_points is not None
                     and t_onsets_st is not None
                 ):
-                    r_offset = r_offsets[i]
+                    j_point = j_points[i]
                     t_onset = t_onsets_st[i]
 
-                    if not np.isnan(r_offset) and not np.isnan(t_onset):
-                        j_point_idx = int(r_offset)
+                    if not np.isnan(j_point) and not np.isnan(t_onset):
+                        j_point_idx = int(j_point)
                         t_onset_idx = int(t_onset)
 
                         # ST segment from J-point to T-onset
-                        if j_point_idx < t_onset_idx and j_point_idx < len(ch_data):
+                        if j_point_idx < t_onset_idx and j_point_idx < n_samples:
                             st_start = j_point_idx
-                            st_end = min(len(ch_data), t_onset_idx)
+                            st_end = min(n_samples, t_onset_idx)
 
-                # Fallback to S-peak based method if R-offset method not available
+                # Fallback to S-peak based method if J-point method not available
                 if st_start is None or st_end is None:
                     # Use S-peak + 20ms to S-peak + 80ms as fallback
                     st_start = s_idx + int(0.02 * sfreq)
-                    st_end = min(len(ch_data), s_idx + int(0.08 * sfreq))
+                    st_end = min(n_samples, s_idx + int(0.08 * sfreq))
                     j_point_idx = s_idx  # Use S-peak as approximation
 
-                if st_end > st_start and st_start < len(ch_data):
+                if st_end > st_start and st_start < n_samples:
                     st_segment = ch_data[st_start:st_end]
 
                     st_level = np.mean(st_segment) - beat_baseline
@@ -1528,13 +1380,13 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                         st_slopes.append(slope)
 
                     # ST measurements at J+60ms and J+80ms (or S+60ms/S+80ms as fallback)
-                    st60_idx = min(len(ch_data), j_point_idx + int(0.06 * sfreq))
-                    if st60_idx < len(ch_data):
-                        st60_amplitudes.append(ch_data[st60_idx] - beat_baseline)
+                    st60_idx = min(n_samples, j_point_idx + int(0.06 * sfreq))
+                    if st60_idx < n_samples:
+                        st60_levels.append(ch_data[st60_idx] - beat_baseline)
 
-                    st80_idx = min(len(ch_data), j_point_idx + int(0.08 * sfreq))
-                    if st80_idx < len(ch_data):
-                        st80_amplitudes.append(ch_data[st80_idx] - beat_baseline)
+                    st80_idx = min(n_samples, j_point_idx + int(0.08 * sfreq))
+                    if st80_idx < n_samples:
+                        st80_levels.append(ch_data[st80_idx] - beat_baseline)
 
                     st_segment_relative = st_segment - beat_baseline
                     st_areas.append(np.trapezoid(st_segment_relative))
@@ -1545,10 +1397,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 ...
             if st_slopes:
                 features["st_slope"] = float(np.mean(st_slopes))
-            if st60_amplitudes:
-                features["st60_amplitude"] = float(np.mean(st60_amplitudes))
-            if st80_amplitudes:
-                features["st80_amplitude"] = float(np.mean(st80_amplitudes))
+            if st60_levels:
+                features["st60_level"] = float(np.mean(st60_levels))
+            if st80_levels:
+                features["st80_level"] = float(np.mean(st80_levels))
             if st_areas:
                 features["st_area"] = float(np.mean(st_areas))
 

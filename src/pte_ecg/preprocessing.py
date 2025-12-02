@@ -88,6 +88,11 @@ class PreprocessingSettings(pydantic.BaseModel):
         bandpass: Settings for bandpass filtering.
         notch: Settings for notch filtering.
         normalize: Settings for normalization.
+        drop_mode: Mode for handling flat recordings. One of:
+            - "any": Drop recordings where any channel is flat (default)
+            - "all": Drop recordings where all channels are flat
+            - "none": Do not drop any recordings
+            - int: Drop recordings where at least this number of channels are flat
     """
 
     enabled: bool = True
@@ -95,13 +100,14 @@ class PreprocessingSettings(pydantic.BaseModel):
     bandpass: BandpassArgs = Field(default_factory=BandpassArgs)
     notch: NotchArgs = Field(default_factory=NotchArgs)
     normalize: NormalizeArgs = Field(default_factory=NormalizeArgs)
+    drop_mode: Literal["all", "any", "none"] | int = "any"
 
 
 def preprocess(
-    ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
+    ecg: ECGData,
     sfreq: float,
     preprocessing: PreprocessingSettings,
-) -> tuple[ECGData, float]:  # Returns: (processed_ecg, new_sfreq)
+) -> tuple[ECGData, float]:
     """Apply preprocessing steps to ECG data.
 
     This function applies the following preprocessing steps in order:
@@ -142,7 +148,7 @@ def preprocess(
         logger.debug("Preprocessing is disabled, returning original data.")
         return ecg, sfreq
 
-    ecg = _check_flats(ecg, drop_flat_recs=True)
+    ecg = _check_flats(ecg, drop_mode=preprocessing.drop_mode)
 
     n_ecgs, n_channels, n_times = ecg.shape
     logger.info(
@@ -167,28 +173,27 @@ def preprocess(
         l_freq = preprocessing.bandpass.l_freq
         h_freq = preprocessing.bandpass.h_freq
 
-        if l_freq is not None or h_freq is not None:
-            nyquist = sfreq_new / 2
+        nyquist = sfreq_new / 2
 
-            # Design filter
-            if l_freq is not None and h_freq is not None:
-                # Bandpass filter
-                low = l_freq / nyquist
-                high = h_freq / nyquist
-                b, a = signal.butter(4, [low, high], btype="band")
-            elif l_freq is not None:
-                # High-pass filter
-                low = l_freq / nyquist
-                b, a = signal.butter(4, low, btype="high")
-            else:
-                # Low-pass filter
-                high = h_freq / nyquist
-                b, a = signal.butter(4, high, btype="low")
+        if h_freq is not None and l_freq is not None:
+            b, a = signal.butter(4, [l_freq / nyquist, h_freq / nyquist], btype="band")
+            logger.info(f"Applying band-pass filter: {l_freq} Hz - {h_freq} Hz")
+        elif l_freq is not None:
+            # High-pass filter
+            b, a = signal.butter(4, [l_freq / nyquist, None], btype="high")
+            logger.info(f"Applying high-pass filter: {l_freq} Hz")
+        elif h_freq is not None:
+            # Low-pass filter
+            b, a = signal.butter(4, [None, h_freq / nyquist], btype="low")
+            logger.info(f"Applying low-pass filter: {h_freq} Hz")
+        else:
+            raise ValueError("If bandpass is enabled, either l_freq or h_freq must be provided")
 
-            # Apply filter to each ECG and channel
-            for i in range(n_ecgs):
-                for j in range(n_channels):
-                    ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
+        # Apply filter to each ECG and channel
+        for i in range(n_ecgs):
+            for j in range(n_channels):
+                ecg[i, j, :] = signal.filtfilt(b, a, ecg[i, j, :])
+
     if preprocessing.notch.enabled and preprocessing.notch.freq is not None:
         # Apply notch filter using scipy
         freq = preprocessing.notch.freq
@@ -246,7 +251,23 @@ def preprocess(
     return ecg, sfreq_new
 
 
-def _check_flats(ecg: ECGData, drop_flat_recs: bool) -> ECGData:
+def _check_flats(ecg: ECGData, drop_mode: Literal["all", "any", "none"] | int) -> ECGData:
+    """Check for flat channels and optionally drop recordings based on the specified mode.
+
+    Args:
+        ecg: Input ECG data with shape (n_ecgs, n_channels, n_timepoints).
+        drop_mode: Mode for handling flat recordings. One of:
+            - "all": Drop recordings where all channels are flat
+            - "any": Drop recordings where any channel is flat
+            - "none": Do not drop any recordings
+            - int: Drop recordings where at least this number of channels are flat
+
+    Returns:
+        ECG data with potentially dropped recordings.
+
+    Raises:
+        ValueError: If all channels of all recordings are flat lines.
+    """
     are_flat_chs = np.all(np.isclose(ecg, ecg[..., 0:1]), axis=-1)
     n_flats = np.sum(are_flat_chs)
     if n_flats == ecg.shape[0] * ecg.shape[1]:
@@ -254,13 +275,31 @@ def _check_flats(ecg: ECGData, drop_flat_recs: bool) -> ECGData:
     if n_flats > 0:
         have_flat_chs = np.any(are_flat_chs, axis=-1)
         logger.warning(f"{n_flats} channels in {have_flat_chs.sum()}/{ecg.shape[0]} recordings are flat lines.")
-    are_empty_recordings = np.all(are_flat_chs, axis=-1)
-    n_empty_recordings = np.sum(are_empty_recordings)
-    empty_recordings = np.where(are_empty_recordings)[0]
-    if n_empty_recordings > 0 and drop_flat_recs:
-        logger.warning(
-            f"Discarding {n_empty_recordings} recordings with flat lines in all channels."
-            f" Recording indices: {empty_recordings}."
+
+    if drop_mode == "none":
+        return ecg
+    elif drop_mode == "all":
+        recordings_to_drop = np.all(are_flat_chs, axis=-1)
+    elif drop_mode == "any":
+        recordings_to_drop = np.any(are_flat_chs, axis=-1)
+    elif isinstance(drop_mode, int):
+        n_flat_per_recording = np.sum(are_flat_chs, axis=-1)
+        recordings_to_drop = n_flat_per_recording >= drop_mode
+    else:
+        raise ValueError(f'Invalid drop_mode value: {drop_mode}. Must be one of "all", "any", "none", or an integer.')
+
+    n_empty_recordings = np.sum(recordings_to_drop)
+    empty_recordings = np.where(recordings_to_drop)[0]
+    if n_empty_recordings > 0:
+        mode_desc = (
+            "all flat channels"
+            if drop_mode == "all"
+            else "any flat channel"
+            if drop_mode == "any"
+            else f"at least {drop_mode} flat channels"
         )
-        ecg = ecg[~are_empty_recordings]
+        logger.info(
+            f"Discarding {n_empty_recordings} recordings with {mode_desc}. Recording indices: {empty_recordings}."
+        )
+        ecg = ecg[~recordings_to_drop]
     return ecg

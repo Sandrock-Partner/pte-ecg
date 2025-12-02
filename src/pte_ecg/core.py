@@ -78,10 +78,8 @@ class FeatureExtractor:
                 logger.debug(f"Extractor '{extractor_name}' is disabled, skipping")
                 continue
 
-            # Pass all config kwargs except 'enabled' to the extractor
             config_kwargs = {k: v for k, v in extractor_config.items() if k != "enabled"}
 
-            # Get extractor class from registry and initialize with dependency injection + config
             extractor_class = registry.get(extractor_name)
             extractors[extractor_name] = extractor_class(self, **config_kwargs)
             logger.info(f"Initialized {extractor_name} extractor")
@@ -94,7 +92,7 @@ class FeatureExtractor:
 
     def extract_features(
         self,
-        ecg: ECGData,  # Shape: (n_ecgs, n_channels, n_timepoints)
+        ecg: ECGData,
     ) -> pd.DataFrame:
         """Extract features from ECG data.
 
@@ -140,7 +138,6 @@ class FeatureExtractor:
             f"(leads: {self.lead_order}) and {n_times} timepoints at {self.sfreq} Hz"
         )
 
-        # Apply preprocessing (may update self.sfreq)
         if self.settings.preprocessing.enabled:
             logger.info("Applying preprocessing pipeline")
             ecg, new_sfreq = preprocess(ecg, self.sfreq, self.settings.preprocessing)
