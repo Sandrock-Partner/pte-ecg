@@ -6,7 +6,7 @@ authors = [{ name = "Richard M. Köhler", email = "richard.koehler@outlook.de" }
 maintainers = [
     { name = "Richard M. Köhler", email = "richard.koehler@outlook.de" },
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "h5py>=3.15.1",
     "matplotlib>=3.10.7",
@@ -15,10 +15,10 @@ dependencies = [
     "pandas>=2.3.0",
     "pyarrow>=22.0.0",
     "pydantic>=2.11.7",
-    "pywavelets>=1.8.0", # This is actually a neurokit2 dependency
+    "pywavelets>=1.8.0",  # This is actually a neurokit2 dependency
     "scipy>=1.15.3",
     "tqdm>=4.66.0",
-    "ts2vg>=1.2.4", # This is actually a neurokit2 dependency
+    "ts2vg>=1.2.4",       # This is actually a neurokit2 dependency
 ]
 dynamic = ["version"]
 keywords = ["ecg", "features", "timeseries", "electrocardiogram"]

@@ -4,12 +4,10 @@ This extractor performs comprehensive waveform analysis including peak detection
 interval calculations, ST segment analysis, and territory-specific markers.
 """
 
-from __future__ import annotations
-
 import math
 import multiprocessing
 import warnings
-from typing import TYPE_CHECKING, Literal
+from typing import Literal, Self, get_args
 
 import neurokit2 as nk
 import numpy as np
@@ -20,11 +18,62 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from tqdm import tqdm
 
 from .._logging import logger
+from ..core import FeatureExtractor
 from . import utils
 from .base import BaseFeatureExtractor
 
-if TYPE_CHECKING:
-    from ..core import FeatureExtractor
+PeakMethod = Literal[
+    "pantompkins",
+    "neurokit",
+    "nabian",
+    "slopesumfunction",
+    "zong",
+    "hamilton",
+    "christov",
+    "engzeemod",
+    "elgendi",
+    "kalidas",
+    "rodrigues",
+    "vg",
+    "emrich2023",
+    "promac",
+]
+PeakMethods = list[PeakMethod]
+PEAKMETHODS: PeakMethods = list(get_args(PeakMethod))
+
+WaveName = Literal[
+    "P_Peaks",
+    "Q_Peaks",
+    "R_Peaks",
+    "S_Peaks",
+    "T_Peaks",
+    "P_Onsets",
+    "P_Offsets",
+    "R_Onsets",
+    "R_Offsets",
+    "T_Onsets",
+    "T_Offsets",
+    "J_Points",
+]
+WaveNames = frozenset[WaveName]
+WAVE_NAMES: WaveNames = frozenset(get_args(WaveName))
+
+
+WAVE_INTERVALS: list[tuple[WaveName, WaveName, str, float, float]] = [
+    ("P_Peaks", "R_Peaks", "pr_interval", 80, 300),  # PR interval: typically 120-200ms
+    ("P_Peaks", "Q_Peaks", "pq_interval", 80, 300),  # PQ interval: similar to PR
+    ("Q_Peaks", "R_Peaks", "qr_interval", 5, 100),  # Part of QRS: typically <40ms
+    ("Q_Peaks", "S_Peaks", "qrs_duration", 40, 200),  # QRS duration: typically 60-100ms
+    ("R_Peaks", "S_Peaks", "rs_interval", 15, 100),  # Part of QRS: typically 40-60ms
+    ("S_Peaks", "T_Onsets", "st_duration", 40, 200),  # ST segment: typically 80-120ms
+    ("Q_Peaks", "T_Offsets", "qt_interval", 200, 700),  # QT interval: typically 300-450ms (HR dependent)
+    ("R_Peaks", "T_Onsets", "rt_duration", 100, 400),  # R to T onset: typically 200-300ms
+    ("R_Peaks", "T_Peaks", "rt_interval", 150, 500),  # R to T peak: typically 250-350ms
+    ("P_Peaks", "T_Peaks", "pt_interval", 200, 1000),  # P to T: entire cycle minus TP segment
+    ("R_Onsets", "R_Offsets", "r_duration", 40, 200),  # R wave duration: typically 60-100ms
+    ("P_Onsets", "P_Offsets", "p_duration", 40, 150),  # P wave duration: typically 80-120ms
+    ("T_Onsets", "T_Offsets", "t_duration", 50, 250),  # T wave duration: typically 100-200ms
+]
 
 
 class Waves(BaseModel):
@@ -75,7 +124,7 @@ class Waves(BaseModel):
         return [np.nan if np.isnan(x) else int(x) for x in v]
 
     @model_validator(mode="after")
-    def validate_consistent_lengths(self) -> Waves:
+    def validate_consistent_lengths(self) -> Self:
         """Ensure all wave lists have consistent lengths."""
         lengths = {name: len(getattr(self, name)) for name in self.model_fields if len(getattr(self, name)) > 0}
         if lengths:
@@ -100,38 +149,12 @@ class Waves(BaseModel):
     def get_array(self, wave_name: str) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
         """Get wave indices as numpy array for a given wave name.
 
-        This method converts the stored list to a numpy array and caches the result
-        for performance. The cache is invalidated if the model is modified.
-
-        Args:
-            wave_name: Name of the wave (e.g., 'P', 'Q', 'R', 'S', 'T', 'P_onset', etc.)
-
-        Returns:
-            Numpy array of wave indices, empty array if wave not found or empty
-
         Examples:
             >>> waves = Waves(...)
-            >>> p_array = waves.get_array('P')
-            >>> r_array = waves.get_array('R')
+            >>> p_array = waves.get_array('P_Peaks')
+            >>> r_array = waves.get_array('R_Peaks')
         """
-        # Map common names to field names
-        wave_map = {
-            "P": "p_peaks",
-            "Q": "q_peaks",
-            "R": "r_peaks",
-            "S": "s_peaks",
-            "T": "t_peaks",
-            "P_onset": "p_onsets",
-            "P_offset": "p_offsets",
-            "R_onset": "r_onsets",
-            "R_offset": "r_offsets",
-            "T_onset": "t_onsets",
-            "T_offset": "t_offsets",
-            "J": "j_points",
-        }
-
-        field_name = wave_map.get(wave_name, wave_name)
-        wave_list = getattr(self, field_name)
+        wave_list = getattr(self, wave_name.lower())
         return np.array(wave_list, dtype=float)
 
 
@@ -144,58 +167,6 @@ def _safe_nanmean(values: list | np.ndarray) -> float:
     if np.all(np.isnan(arr)):
         return np.nan
     return float(np.nanmean(arr))
-
-
-# Peak detection methods to try (in order of preference)
-_METHODS_FINDPEAKS = [
-    "pantompkins",
-    "neurokit",
-    "nabian",
-    "slopesumfunction",
-    "zong",
-    "hamilton",
-    "christov",
-    "engzeemod",
-    "elgendi",
-    "kalidas",
-    "rodrigues",
-    "vg",
-    "emrich2023",
-    "promac",
-]
-
-# Type alias for peak detection methods
-PeakMethod = Literal[
-    "neurokit",
-    "pantompkins",
-    "nabian",
-    "slopesumfunction",
-    "zong",
-    "hamilton",
-    "christov",
-    "engzeemod",
-    "elgendi",
-    "kalidas",
-    "rodrigues",
-    "vg",
-    "emrich2023",
-    "promac",
-]
-
-_INTERVAL_PAIRS = [
-    ("P", "R", "pr_interval", 80, 300),  # PR interval: typically 120-200ms
-    ("P", "Q", "pq_interval", 80, 300),  # PQ interval: similar to PR
-    ("Q", "R", "qr_interval", 5, 100),  # Part of QRS: typically <40ms
-    ("Q", "S", "qrs_duration", 40, 200),  # QRS duration: typically 60-100ms
-    ("R", "S", "rs_interval", 15, 100),  # Part of QRS: typically 40-60ms
-    ("S", "T_onset", "st_duration", 40, 200),  # ST segment: typically 80-120ms
-    ("Q", "T_offset", "qt_interval", 200, 700),  # QT interval: typically 300-450ms (HR dependent)
-    ("R", "T_onset", "rt_duration", 100, 400),  # R to T onset: typically 200-300ms
-    ("R", "T", "rt_interval", 150, 500),  # R to T peak: typically 250-350ms
-    ("P", "T", "pt_interval", 200, 1000),  # P to T: entire cycle minus TP segment
-    ("P_onset", "P_offset", "p_duration", 40, 150),  # P wave duration: typically 80-120ms
-    ("T_onset", "T_offset", "t_duration", 50, 250),  # T wave duration: typically 100-200ms
-]
 
 
 class ECGDelineationError(Exception):
@@ -489,7 +460,7 @@ def _detect_r_peaks(
     """
     peaks_per_method: dict[PeakMethod, np.ndarray] = {}
     max_n_peaks = 0
-    for method in _METHODS_FINDPEAKS:
+    for method in PEAKMETHODS:
         _, peaks_info = nk.ecg_peaks(
             ch_data,
             sampling_rate=np.rint(sfreq).astype(int) if method in ["zong", "emrich2023"] else sfreq,
@@ -1291,11 +1262,18 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             global_baseline = float(np.nanmedian(ch_data[: min(baseline_samples, n_samples)]))
         features["baseline_median"] = global_baseline
 
+        wave_map = {wave: waves.get_array(wave) for wave in WAVE_NAMES}
+
         # Vectorized interval calculation for all pairs
-        for interval_pair in _INTERVAL_PAIRS:
+        for interval_pair in WAVE_INTERVALS:
             wave1, wave2, feature_name, min_interval_ms, max_interval_ms = interval_pair
-            peaks1 = waves.get_array(wave1)
-            peaks2 = waves.get_array(wave2)
+
+            peaks1 = wave_map[wave1]
+            peaks2 = wave_map[wave2]
+
+            features[f"{feature_name}_mean"] = np.nan
+            features[f"{feature_name}_median"] = np.nan
+            features[f"{feature_name}_std"] = np.nan
 
             if len(peaks1) == 0 or len(peaks2) == 0:
                 continue
@@ -1309,6 +1287,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features[f"{feature_name}_std"] = stats["std"]
 
         # Flächen (Integrale unter den Kurven)
+        features["p_area"] = np.nan
         if n_p_onsets and n_p_offsets:
             p_areas = []
             max_index = min(n_p_onsets, n_p_offsets)
@@ -1320,6 +1299,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["p_area"] = float(np.mean(p_areas))
 
         # T Area
+        features["t_area"] = np.nan
         if n_t_onsets and n_t_offsets:
             t_areas = []
             max_index = min(n_t_onsets, n_t_offsets)
@@ -1331,6 +1311,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["t_area"] = float(np.mean(t_areas))
 
         # R Slope
+        features["r_slope"] = np.nan
         if n_r_peaks and n_q_peaks and r_peaks is not None:
             r_slopes = []
             max_index = min(n_r_peaks, n_q_peaks)
@@ -1345,6 +1326,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["r_slope"] = float(np.mean(r_slopes))
 
         # T Slope
+        features["t_slope"] = np.nan
         if n_t_onsets and n_t_offsets:
             t_slopes = []
             max_index = min(n_t_onsets, n_t_offsets)
@@ -1359,6 +1341,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["t_slope"] = float(np.mean(t_slopes))
 
         # Amplituden
+        features["p_amplitude_mean"] = np.nan
+        features["p_amplitude_std"] = np.nan
         if n_p_peaks:
             p_peaks_array = np.asarray(p_peaks)
             valid_mask = ~np.isnan(p_peaks_array)
@@ -1368,6 +1352,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["p_amplitude_mean"] = float(np.mean(p_amplitudes))
                 features["p_amplitude_std"] = float(np.std(p_amplitudes)) if len(p_amplitudes) > 1 else 0.0
 
+        features["q_amplitude_mean"] = np.nan
+        features["q_amplitude_std"] = np.nan
+        features["q_width"] = np.nan
+        features["q_width_pathological"] = np.nan
         if n_q_peaks:
             q_peaks_array = np.asarray(q_peaks)
             valid_mask = ~np.isnan(q_peaks_array)
@@ -1380,7 +1368,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             # Q wave width (duration from Q onset to Q peak)
             # Pathological if > 40ms
             # Note: Q onsets are approximated using R onsets as Q typically starts at QRS onset
-            features["q_width_pathological"] = 0.0  # Initialize
             q_onsets_approx = r_onsets if n_r_onsets > 0 else None
             if q_onsets_approx is not None and len(q_onsets_approx) > 0:
                 q_widths = []
@@ -1396,6 +1383,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                     # Pathological Q wave width (>40ms)
                     features["q_width_pathological"] = 1.0 if np.mean(q_widths) > 40.0 else 0.0
 
+        features["r_amplitude_mean"] = np.nan
+        features["r_amplitude_std"] = np.nan
         if n_r_peaks:
             r_peaks_array = np.asarray(r_peaks)
             valid_mask = ~np.isnan(r_peaks_array)
@@ -1405,6 +1394,15 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["r_amplitude_mean"] = float(np.mean(r_amplitudes))
                 features["r_amplitude_std"] = float(np.std(r_amplitudes)) if len(r_amplitudes) > 1 else 0.0
 
+        features["rr_interval_mean"] = np.nan
+        features["rr_interval_std"] = np.nan
+        features["rr_interval_median"] = np.nan
+        features["rr_interval_iqr"] = np.nan
+        features["rr_interval_skewness"] = np.nan
+        features["rr_interval_kurtosis"] = np.nan
+        features["rr_interval_sd1"] = np.nan
+        features["rr_interval_sd2"] = np.nan
+        features["rr_interval_sd1_sd2_ratio"] = np.nan
         if n_r_peaks > 1 and r_peaks is not None:
             rr_intervals = np.diff(r_peaks) / sfreq
             rr_intervals = rr_intervals[~np.isnan(rr_intervals)]
@@ -1438,6 +1436,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["rr_interval_sd2"] = sd2
                 features["rr_interval_sd1_sd2_ratio"] = sd1 / (sd2 + utils.EPS) if not np.isnan(sd2) else np.nan
 
+        features["s_amplitude_mean"] = np.nan
+        features["s_amplitude_std"] = np.nan
         if n_s_peaks:
             s_peaks_array = np.asarray(s_peaks)
             valid_mask = ~np.isnan(s_peaks_array)
@@ -1447,6 +1447,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["s_amplitude_mean"] = float(np.mean(s_amplitudes))
                 features["s_amplitude_std"] = float(np.std(s_amplitudes)) if len(s_amplitudes) > 1 else 0.0
 
+        features["j_amplitude_mean"] = np.nan
+        features["j_amplitude_std"] = np.nan
         if j_points is not None and len(j_points) > 0:
             j_points_array = np.asarray(j_points)
             valid_mask = ~np.isnan(j_points_array)
@@ -1468,7 +1470,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                         features["j_amplitude_std"] = float(np.std(j_amplitudes)) if len(j_amplitudes) > 1 else 0.0
 
         # QRS Fragmentation (count notches/direction changes in QRS complex)
-        features["qrs_fragmentation"] = 0.0
+        features["qrs_fragmentation"] = np.nan
         if n_q_peaks and n_s_peaks:
             fragmentations = []
             for q_idx, s_idx in zip(q_peaks, s_peaks, strict=True):
@@ -1490,7 +1492,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         # Pathological Q wave detection
         # Pathological if QRS duration > 40ms AND Q amplitude > 25% of R amplitude
-        features["pathological_q"] = 0.0
+        features["pathological_q"] = np.nan
         if "qrs_duration_mean" in features and "q_amplitude_mean" in features and "r_amplitude_mean" in features:
             qrs_dur = features["qrs_duration_mean"]
             q_amp = abs(features["q_amplitude_mean"])
@@ -1499,6 +1501,9 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["pathological_q"] = 1.0
 
         # Initialize T wave morphological features
+        features["t_amplitude_mean"] = np.nan
+        features["t_amplitude_std"] = np.nan
+        features["t_inversion_depth"] = np.nan
         if n_t_peaks:
             t_peaks_array = np.asarray(t_peaks)
             valid_mask = ~np.isnan(t_peaks_array)
@@ -1513,8 +1518,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 if np.any(negative_mask):
                     t_inversion_depths = np.abs(t_amplitudes[negative_mask])
                     features["t_inversion_depth"] = float(np.mean(t_inversion_depths))
-                else:
-                    features["t_inversion_depth"] = np.nan
 
         # T-wave symmetry (ratio of ascending to descending limb duration)
         features["t_symmetry"] = np.nan
@@ -1579,6 +1582,11 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         # ST Segment Features
         # Use R-offset (J-point) and T-onset when available, otherwise fall back to S-peak based method
+        features["st_level"] = np.nan
+        features["st_slope"] = np.nan
+        features["st60_level"] = np.nan
+        features["st80_level"] = np.nan
+        features["st_area"] = np.nan
         if n_s_peaks and r_peaks is not None:
             st_elevations = []
             st_slopes = []
@@ -1658,6 +1666,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
 
         # QTc (Corrected QT interval using Bazett's formula)
         # QTc = QT / √(RR) where QT is in ms and RR is in seconds
+        features["qtc_bazett"] = np.nan
+        features["qtc_fridericia"] = np.nan
         if "qt_interval_mean" in features and "rr_interval_mean" in features:
             qt_ms = features["qt_interval_mean"]
             rr_sec = features["rr_interval_mean"]
@@ -1670,30 +1680,28 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["qtc_fridericia"] = qt_ms  # Fallback if RR is invalid
 
         # Interval Ratios
+        features["qt_rr_ratio"] = np.nan
+        features["pr_rr_ratio"] = np.nan
+        features["t_qt_ratio"] = np.nan
+        features["t_r_ratio"] = np.nan
+        features["q_to_r_ratio"] = np.nan
+
         rr_mean = features.get("rr_interval_mean")
-        rr_ms = rr_mean * 1000 if rr_mean is not None else None
+        rr_ms = rr_mean * 1000 if rr_mean is not None and not np.isnan(rr_mean) else None
 
         # QT/RR ratio
         if "qt_interval_mean" in features and rr_ms is not None and rr_ms > 0:
             features["qt_rr_ratio"] = features["qt_interval_mean"] / rr_ms
-        else:
-            features["qt_rr_ratio"] = np.nan
 
         # PR/RR ratio (using pq_interval as PR interval)
         if "pq_interval_mean" in features and rr_ms is not None and rr_ms > 0:
             features["pr_rr_ratio"] = features["pq_interval_mean"] / rr_ms
-        else:
-            features["pr_rr_ratio"] = np.nan
 
         # T/QT ratio
         if "t_duration_mean" in features and "qt_interval_mean" in features:
             qt_ms = features["qt_interval_mean"]
             if qt_ms > 0:
                 features["t_qt_ratio"] = features["t_duration_mean"] / qt_ms
-            else:
-                features["t_qt_ratio"] = np.nan
-        else:
-            features["t_qt_ratio"] = np.nan
 
         # T/R amplitude ratio
         if "t_amplitude_mean" in features and "r_amplitude_mean" in features:
@@ -1701,10 +1709,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             t_amp = features["t_amplitude_mean"]
             if r_amp is not None and abs(r_amp) > 0:
                 features["t_r_ratio"] = float(t_amp / r_amp)
-            else:
-                features["t_r_ratio"] = np.nan
-        else:
-            features["t_r_ratio"] = np.nan
 
         # Q/R amplitude ratio
         if "q_amplitude_mean" in features and "r_amplitude_mean" in features:
@@ -1712,10 +1716,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             q_amp = features["q_amplitude_mean"]
             if r_amp is not None and abs(r_amp) > 0 and q_amp is not None:
                 features["q_to_r_ratio"] = float(abs(q_amp) / abs(r_amp))
-            else:
-                features["q_to_r_ratio"] = np.nan
-        else:
-            features["q_to_r_ratio"] = np.nan
 
         return features
 
