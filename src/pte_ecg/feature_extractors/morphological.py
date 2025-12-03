@@ -60,18 +60,20 @@ WAVE_NAMES: WaveNames = frozenset(get_args(WaveName))
 
 
 WAVE_INTERVALS: list[tuple[WaveName, WaveName, str, float, float]] = [
-    ("P_Peaks", "R_Peaks", "pr_interval", 80, 300),  # PR interval: typically 120-200ms
-    ("P_Peaks", "Q_Peaks", "pq_interval", 80, 300),  # PQ interval: similar to PR
-    ("Q_Peaks", "R_Peaks", "qr_interval", 5, 100),  # Part of QRS: typically <40ms
+    ("P_Onsets", "P_Offsets", "p_duration", 40, 150),  # P wave duration: typically 80-120ms
+    ("P_Peaks", "Q_Peaks", "p_peak_to_q_peak", 80, 300),  # PQ interval: typically 120-200ms
+    ("P_Onsets", "R_Onsets", "p_onset_to_r_onset", 80, 300),  # PR interval: typically 120-200ms
+    ("P_Peaks", "R_Peaks", "p_peak_to_r_peak", 80, 300),  # PR interval: similar to PR
+    ("Q_Peaks", "R_Peaks", "q_peak_to_r_peak", 5, 100),  # Part of QRS: typically <40ms
     ("Q_Peaks", "S_Peaks", "qrs_duration", 40, 200),  # QRS duration: typically 60-100ms
+    ("Q_Peaks", "T_Offsets", "qt_interval", 200, 700),  # QT interval: typically 300-450ms (HR dependent)
     ("R_Peaks", "S_Peaks", "rs_interval", 15, 100),  # Part of QRS: typically 40-60ms
     ("S_Peaks", "T_Onsets", "st_duration", 40, 200),  # ST segment: typically 80-120ms
-    ("Q_Peaks", "T_Offsets", "qt_interval", 200, 700),  # QT interval: typically 300-450ms (HR dependent)
+    # ("S_Peaks", "T_Peaks", "st_duration", 40, 200),  # ST segment: typically 80-120ms
     ("R_Peaks", "T_Onsets", "rt_duration", 100, 400),  # R to T onset: typically 200-300ms
     ("R_Peaks", "T_Peaks", "rt_interval", 150, 500),  # R to T peak: typically 250-350ms
     ("P_Peaks", "T_Peaks", "pt_interval", 200, 1000),  # P to T: entire cycle minus TP segment
     ("R_Onsets", "R_Offsets", "r_duration", 40, 200),  # R wave duration: typically 60-100ms
-    ("P_Onsets", "P_Offsets", "p_duration", 40, 150),  # P wave duration: typically 80-120ms
     ("T_Onsets", "T_Offsets", "t_duration", 50, 250),  # T wave duration: typically 100-200ms
 ]
 
@@ -1217,7 +1219,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         ch_data: np.ndarray,
         sfreq: float,
         r_peaks: np.ndarray | None = None,
-        j_point_offset_ms: float = 0.0,
+        j_point_offset_ms: float | Literal["auto"] = "auto",
     ) -> dict[str, float]:
         """Static method for processing a single channel (multiprocessing compatible).
 
@@ -1226,6 +1228,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             sfreq: Sampling frequency in Hz
             r_peaks: Optional pre-detected R-peaks. If None, peaks are detected from ch_data.
             j_point_offset_ms: Additional offset in milliseconds to add to detected J-points.
+                If "auto", applies method-specific default offset (20ms for all methods).
 
         Returns:
             Dictionary of morphological features
