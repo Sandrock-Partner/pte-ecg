@@ -824,11 +824,11 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         # ====================================================================
         # RV infarction: ST elevation in V1 with ST depression in V2
         if "V1" in lead_order and "V2" in lead_order:
-            v1_st_elev = features.get("morphological_st_level_V1")
-            v2_st_dep = features.get("morphological_st_level_V2")
+            v1_st = features.get("morphological_st_level_V1")
+            v2_st = features.get("morphological_st_level_V2")
             # Ratio for RV infarction pattern
-            if v1_st_elev is not None and v2_st_dep is not None and v2_st_dep != 0:
-                features["morphological_V1_V2_st_level_ratio"] = float(v1_st_elev / v2_st_dep)
+            if v1_st is not None and v2_st is not None and v2_st != 0:
+                features["morphological_V1_V2_st_level_ratio"] = float(v1_st / v2_st)
             else:
                 features["morphological_V1_V2_st_level_ratio"] = np.nan
 
@@ -1452,7 +1452,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
         features["st80_level"] = np.nan
         features["st_area"] = np.nan
         if n_s_peaks and r_peaks is not None:
-            st_elevations = []
+            st_levels = []
             st_slopes = []
             st60_levels = []
             st80_levels = []
@@ -1461,6 +1461,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             # Determine if we can use J-point based method
             use_j_point = n_j_points > 0 and n_t_onsets > 0
 
+            # Improve this logic
             for i, s_peak in enumerate(s_peaks):
                 if np.isnan(s_peak):
                     continue
@@ -1499,7 +1500,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                     st_segment = ch_data[st_start:st_end]
 
                     st_level = np.mean(st_segment) - beat_baseline
-                    st_elevations.append(st_level)
+                    st_levels.append(st_level)
 
                     if len(st_segment) > 1:
                         slope = (st_segment[-1] - st_segment[0]) / len(st_segment)
@@ -1517,8 +1518,8 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                     st_segment_relative = st_segment - beat_baseline
                     st_areas.append(np.trapezoid(st_segment_relative))
 
-            if st_elevations:
-                features["st_level"] = float(np.mean(st_elevations))
+            if st_levels:
+                features["st_level"] = float(np.mean(st_levels))
             if st_slopes:
                 features["st_slope"] = float(np.mean(st_slopes))
             if st60_levels:
