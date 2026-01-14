@@ -43,15 +43,13 @@ morphological = "pte_ecg.feature_extractors.morphological:MorphologicalExtractor
 statistical = "pte_ecg.feature_extractors.statistical:StatisticalExtractor"
 welch = "pte_ecg.feature_extractors.welch:WelchExtractor"
 nonlinear = "pte_ecg.feature_extractors.nonlinear:NonlinearExtractor"
-waveshape = "pte_ecg.feature_extractors.waveshape:WaveShapeExtractor"
 
 [dependency-groups]
 dev = ["mypy", "pre-commit", "tox"]
 lint = ["ruff"]
 test = ["pytest>=6.0", "pytest-cov>=4.2.0"]
 nonlinear = ["nolds>=0.6.2"]
-bispectrum = ["pybispectra>=1.2.1", "numba>=0.61.2"]
-all = ["nolds>=0.6.2", "pybispectra>=1.2.1", "numba>=0.61.2"]
+all = ["nolds>=0.6.2"]
 
 [build-system]
 requires = ["hatchling"]

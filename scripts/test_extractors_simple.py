@@ -38,7 +38,7 @@ for name, extractor_name in extractors_to_test:
         settings = pte_ecg.Settings()
 
         # Disable all extractors
-        for ex in ["fft", "statistical", "welch", "morphological", "nonlinear", "waveshape"]:
+        for ex in ["fft", "statistical", "welch", "morphological", "nonlinear"]:
             setattr(settings.features, ex, {"enabled": False})
 
         # Enable only the one we're testing (with n_jobs=1 to disable multiprocessing)

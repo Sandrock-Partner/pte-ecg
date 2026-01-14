@@ -22,7 +22,6 @@ class FeaturesConfig(BaseModel):
         statistical: Basic statistical summaries (disabled by default)
         welch: Power spectral density features (disabled by default)
         nonlinear: Complexity and entropy features (disabled by default)
-        waveshape: Bispectrum-based features (disabled by default)
 
     Examples:
         # Enable morphological (default) and statistical extractors
@@ -41,7 +40,6 @@ class FeaturesConfig(BaseModel):
     statistical: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
     welch: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
     nonlinear: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
-    waveshape: dict[str, Any] = Field(default_factory=lambda: {"enabled": False})
 
     def get_extractor_config(self, name: str) -> dict[str, Any]:
         """Get configuration for an extractor by name.

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **PTE-ECG** (Python Tools for Electrocardiography) is a modular ECG feature extraction library providing:
 - Configurable preprocessing pipelines (resampling, filtering, normalization)
-- Comprehensive feature extraction (FFT, morphological, nonlinear, statistical, Welch, bispectrum)
+- Comprehensive feature extraction (FFT, morphological, nonlinear, statistical, Welch)
 - Efficient multi-subject, multi-channel processing
 - Clinical-grade morphological features
 
@@ -123,11 +123,6 @@ pandas DataFrame (n_samples × n_features)
    - Fully refactored native implementation
    - Supports parallel processing with multiprocessing
 
-6. **WaveShapeExtractor** (`feature_extractors/waveshape.py`) [Optional]
-   - Bispectrum-based features
-   - Requires: `pip install pte-ecg[bispectrum]`
-   - Fully refactored native implementation (partial - TODO: complete)
-
 #### Entry Points Configuration
 
 Extractors are registered in `pyproject.toml`:
@@ -138,7 +133,6 @@ statistical = "pte_ecg.feature_extractors.statistical:StatisticalExtractor"
 welch = "pte_ecg.feature_extractors.welch:WelchExtractor"
 morphological = "pte_ecg.feature_extractors.morphological:MorphologicalExtractor"
 nonlinear = "pte_ecg.feature_extractors.nonlinear:NonlinearExtractor"
-waveshape = "pte_ecg.feature_extractors.waveshape:WaveShapeExtractor"
 ```
 
 #### Creating Custom Extractors
@@ -186,7 +180,6 @@ settings.features.my_extractor.enabled = True
 - **`welch.py`**: Welch power spectral density features
 - **`morphological.py`**: Morphological waveform features
 - **`nonlinear.py`**: Nonlinear complexity features (optional)
-- **`waveshape.py`**: Bispectrum features (optional)
 
 **`preprocessing.py`** - Signal conditioning
 - Uses scipy.signal for filtering
@@ -314,7 +307,6 @@ All feature extractors fully refactored to native plugin-based architecture:
 3. **WelchExtractor** - Fully refactored, vectorized (19 features/channel)
 4. **MorphologicalExtractor** - Fully refactored native implementation (~800 lines, 50+ features/channel)
 5. **NonlinearExtractor** - Fully refactored native implementation (~400 lines, 30+ features/channel, optional)
-6. **WaveShapeExtractor** - Partially refactored (TODO: complete implementation, optional)
 
 **Architecture Components**
 - ✅ ExtractorRegistry with entry point discovery
@@ -325,9 +317,9 @@ All feature extractors fully refactored to native plugin-based architecture:
 - ✅ Deprecation warnings added to legacy features.py
 
 **Testing Status**
-- ✅ 20 tests passing, 1 skipped (WaveShape incomplete)
+- ✅ 20+ tests passing
 - ✅ 38% code coverage (focused on new extractors)
-- ✅ Individual extractor tests for all 6 extractors
+- ✅ Individual extractor tests for all extractors
 - ✅ Registry discovery and instantiation tests
 - ✅ Multi-extractor integration working
 - ✅ Test fixtures in conftest.py for shared test data
@@ -355,11 +347,8 @@ All morphological features successfully ported from `ecg_feature_extractor.py` t
 
 ### Future Development Phases
 
-**Phase 1: Complete WaveShape Implementation**
-- Finish WaveShapeExtractor refactoring (currently partial)
-- Fix 3D array output issue
-- Add comprehensive tests
-- Update documentation
+**Phase 1: Validation & Benchmarking**
+
 
 **Phase 2: Validation & Benchmarking**
 - Validate on PhysioNet datasets (MIT-BIH, PTB-XL)
@@ -390,7 +379,6 @@ All morphological features successfully ported from `ecg_feature_extractor.py` t
 
 ### Optional (install with `uv sync --group <group>`)
 - **nonlinear**: nolds >= 0.6.2
-- **bispectrum**: pybispectra >= 1.2.1, numba >= 0.61.2
 - **dev**: mypy, pre-commit, tox
 - **test**: pytest >= 6.0, pytest-cov >= 4.2.0
 

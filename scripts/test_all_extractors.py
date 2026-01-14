@@ -27,7 +27,6 @@ extractors_to_test = [
     ("Welch", "welch", True),
     ("Morphological", "morphological", True),
     ("Nonlinear", "nonlinear", False),  # Optional dependency
-    ("WaveShape", "waveshape", False),  # Optional dependency
 ]
 
 results = {}
@@ -46,7 +45,6 @@ for name, extractor_name, is_required in extractors_to_test:
         settings.features.welch = {"enabled": False}
         settings.features.morphological = {"enabled": False}
         settings.features.nonlinear = {"enabled": False}
-        settings.features.waveshape = {"enabled": False}
 
         # Enable only the one we're testing
         setattr(settings.features, extractor_name, {"enabled": True})

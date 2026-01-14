@@ -715,6 +715,10 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             logger.warning("All channels are flat lines. Skipping morphological features.")
             return features
 
+        # Collect per-lead base feature dicts as returned by _process_single_channel.
+        # Keys in these dicts are base feature names (without lead suffix).
+        per_lead_features: dict[str, dict[str, float]] = {}
+
         for ch_num, (ch_data, is_flat) in enumerate(zip(sample_data, flat_chs, strict=True)):
             lead_name = lead_order[ch_num] if ch_num < len(lead_order) else f"ch{ch_num}"
             if is_flat:
@@ -724,6 +728,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             ch_feat = MorphologicalExtractor._process_single_channel(
                 ch_data, self.sfreq, j_point_offset_ms=self.j_point_offset_ms, lead_name=lead_name
             )
+            per_lead_features[lead_name] = ch_feat
             features.update((f"morphological_{key}_{lead_name}", value) for key, value in ch_feat.items())
 
         # Calculate electrical axes (requires combining data from multiple channels)
@@ -749,63 +754,35 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                 features["morphological_p_axis"] = float(np.arctan2(p_amp_lead_avf, p_amp_lead_i) * 180 / np.pi)
 
         # Territory-Specific Markers (requires specific leads to be present)
-        # ====================================================================
+        territory_defs: list[tuple[str, list[str]]] = []
         # 1. SEPTAL WALL (LAD Territory - V1-V2)
-        # ====================================================================
         v1_v2_lead_names = [lead for lead in ["V1", "V2"] if lead in lead_order]
         if len(v1_v2_lead_names) >= 2:
-            features.update(MorphologicalExtractor._calculate_territory_features("V1_V2", v1_v2_lead_names, features))
-
-        # ====================================================================
+            territory_defs.append(("V1_V2", v1_v2_lead_names))
         # 2. ANTERIOR WALL (LAD Territory - V3-V4)
-        # ====================================================================
         v3_v4_lead_names = [lead for lead in ["V3", "V4"] if lead in lead_order]
         if len(v3_v4_lead_names) >= 2:
-            features.update(MorphologicalExtractor._calculate_territory_features("V3_V4", v3_v4_lead_names, features))
-
-        # ====================================================================
+            territory_defs.append(("V3_V4", v3_v4_lead_names))
         # 3. ANTEROSEPTAL WALL (LAD Territory - V1-V4)
-        # ====================================================================
         v1_v4_lead_names = [lead for lead in ["V1", "V2", "V3", "V4"] if lead in lead_order]
         if len(v1_v4_lead_names) >= 4:
-            features.update(MorphologicalExtractor._calculate_territory_features("V1_V4", v1_v4_lead_names, features))
-
-        # ====================================================================
+            territory_defs.append(("V1_V4", v1_v4_lead_names))
         # 4. INFERIOR WALL (RCA or LCx Territory - II, III, aVF)
-        # ====================================================================
         inferior_lead_names = [lead for lead in ["II", "III", "aVF"] if lead in lead_order]
         if len(inferior_lead_names) >= 3:
-            features.update(
-                MorphologicalExtractor._calculate_territory_features("II_III_aVF", inferior_lead_names, features)
-            )
-
-        # Differentiate RCA vs LCx: ST elevation III > II suggests RCA
-        if "II" in lead_order and "III" in lead_order:
-            st_ii = features.get("morphological_st_level_II")
-            st_iii = features.get("morphological_st_level_III")
-            if st_ii is not None and st_iii is not None and st_ii > 0:
-                features["morphological_III_II_st_level_ratio"] = float(st_iii / st_ii)
-            else:
-                features["morphological_III_II_st_level_ratio"] = np.nan
-
-        # ====================================================================
+            territory_defs.append(("II_III_aVF", inferior_lead_names))
         # 5. LATERAL WALL (LCx or Diagonal LAD Territory - I, aVL, V5, V6)
-        # ====================================================================
         lateral_lead_names = [lead for lead in ["I", "aVL", "V5", "V6"] if lead in lead_order]
         if len(lateral_lead_names) >= 4:
+            territory_defs.append(("I_aVL_V5_V6", lateral_lead_names))
+
+        for territory_name, territ_leads in territory_defs:
             features.update(
-                MorphologicalExtractor._calculate_territory_features("I_aVL_V5_V6", lateral_lead_names, features)
+                MorphologicalExtractor._calculate_territory_features(territory_name, territ_leads, features)
             )
+            MorphologicalExtractor._aggregate_territory_means(territory_name, territ_leads, per_lead_features, features)
 
-        # Reciprocal ST depression in lateral leads (for inferior MI)
-        i_avl_lead_names = [lead for lead in ["I", "aVL"] if lead in lead_order]
-        if len(i_avl_lead_names) >= 2:
-            i_avl_st_dep_values = [features.get(f"morphological_st_level_{lead}", np.nan) for lead in i_avl_lead_names]
-            features["morphological_I_aVL_st_level"] = _safe_nanmean(i_avl_st_dep_values)
-
-        # ====================================================================
         # 6. POSTERIOR WALL (RCA or LCx Territory - reciprocal in V1-V3)
-        # ====================================================================
         v1_v3_lead_names_posterior = [lead for lead in ["V1", "V2", "V3"] if lead in lead_order]
         if len(v1_v3_lead_names_posterior) >= 3:
             # Tall R waves in V1-V3 (suggestive of posterior MI)
@@ -819,9 +796,7 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             else:
                 features["morphological_V1_V3_r_amplitude"] = np.nan
 
-        # ====================================================================
         # 7. RIGHT VENTRICULAR (RCA proximal Territory - V1, V4R)
-        # ====================================================================
         # RV infarction: ST elevation in V1 with ST depression in V2
         if "V1" in lead_order and "V2" in lead_order:
             v1_st = features.get("morphological_st_level_V1")
@@ -832,15 +807,22 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             else:
                 features["morphological_V1_V2_st_level_ratio"] = np.nan
 
-        # ====================================================================
-        # PHASE 1: EARLY MI MARKERS
-        # ====================================================================
+        # Differentiate RCA vs LCx: ST elevation III > II suggests RCA
+        if "II" in lead_order and "III" in lead_order:
+            st_ii = features.get("morphological_st_level_II")
+            st_iii = features.get("morphological_st_level_III")
+            if st_ii is not None and st_iii is not None and st_ii > 0:
+                features["morphological_III_II_st_level_ratio"] = float(st_iii / st_ii)
+            else:
+                features["morphological_III_II_st_level_ratio"] = np.nan
+
+        # EARLY MI MARKERS
         # 1. T-wave inversion in lead aVL (early ACS indicator)
         if "aVL" in lead_order:
             avl_t_inv = features.get("morphological_t_inversion_depth_aVL")
             features["morphological_aVL_t_inversion"] = float(avl_t_inv) if avl_t_inv is not None else np.nan
 
-        # 3. Loss of precordial T-wave balance
+        # 2. Loss of precordial T-wave balance
         # Disproportionate T-wave amplitude between precordial leads (early ischemia sign)
         precordial_leads = [lead for lead in ["V1", "V2", "V3", "V4", "V5", "V6"] if lead in lead_order]
         if len(precordial_leads) >= 3:
@@ -869,7 +851,6 @@ class MorphologicalExtractor(BaseFeatureExtractor):
                     features["morphological_precordial_t_imbalance_ratio"] = 1.0 if max_min_ratio > 3.0 else 0.0
 
         # R WAVE PROGRESSION (across precordial leads V1-V6)
-        # Get R amplitudes in V1-V6
         r_amplitudes = []
         precordial_leads = [lead for lead in ["V1", "V2", "V3", "V4", "V5", "V6"] if lead in lead_order]
         for lead_name in precordial_leads:
@@ -942,6 +923,44 @@ class MorphologicalExtractor(BaseFeatureExtractor):
             territory_features[f"morphological_{territory_name}_t_inversion"] = _safe_nanmean(t_inv_values)
 
         return territory_features
+
+    @staticmethod
+    def _aggregate_territory_means(
+        territory_name: str,
+        territory_leads: list[str],
+        per_lead_features: dict[str, dict[str, float]],
+        features: dict[str, float],
+    ) -> None:
+        """Create mean features over all leads in a territory for every base feature.
+
+        For each base feature present in any of the territory's leads, compute the mean
+        across those leads (ignoring NaNs) and store it as:
+
+            morphological_{territory_name}_{base_name}
+
+        Existing keys are not overwritten, so specialized implementations take precedence.
+        """
+        # Collect all base feature names available in at least one lead of the territory
+        base_names: set[str] = set()
+        for lead in territory_leads:
+            base_names.update(per_lead_features.get(lead, {}).keys())
+
+        for base_name in base_names:
+            values = []
+            for lead in territory_leads:
+                lead_feats = per_lead_features.get(lead, {})
+                if base_name in lead_feats:
+                    values.append(lead_feats[base_name])
+
+            if not values:
+                continue
+
+            territory_key = f"morphological_{territory_name}_{base_name}"
+            # Do not overwrite if a more specialized implementation already exists
+            if territory_key in features:
+                continue
+
+            features[territory_key] = _safe_nanmean(values)
 
     @staticmethod
     def _calculate_beatwise_baseline(

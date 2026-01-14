@@ -94,7 +94,6 @@ def test_get_features_empty_features(test_data: tuple[np.ndarray, int]):
                 nonlinear={"enabled": False},
                 statistical={"enabled": False},
                 welch={"enabled": False},
-                waveshape={"enabled": False},
             )
         )
 

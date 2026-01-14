@@ -19,13 +19,6 @@ try:
 except ImportError:
     HAS_NONLINEAR = False
 
-try:
-    from pte_ecg.feature_extractors.waveshape import WaveShapeExtractor
-
-    HAS_WAVESHAPE = True
-except ImportError:
-    HAS_WAVESHAPE = False
-
 
 class TestFFTExtractor:
     """Tests for FFTExtractor."""
@@ -263,34 +256,6 @@ class TestNonlinearExtractor:
         assert features_single.shape == features_multi.shape
 
 
-@pytest.mark.skipif(not HAS_WAVESHAPE, reason="pybispectra package not installed")
-class TestWaveShapeExtractor:
-    """Tests for WaveShapeExtractor (requires pybispectra)."""
-
-    def test_basic_extraction(self, test_data: tuple[np.ndarray, int]):
-        """Test basic waveshape feature extraction."""
-        # Skip this test for now - WaveShape implementation is incomplete
-        # TODO: Complete WaveShape implementation and enable this test
-        pytest.skip("WaveShape implementation is incomplete - returns 3D array instead of 2D")
-
-    def test_import_error_without_pybispectra(self, monkeypatch):
-        """Test that proper error is raised when pybispectra is not installed."""
-        # This test only runs if pybispectra IS installed, so we simulate it not being available
-        if not HAS_WAVESHAPE:
-            pytest.skip("pybispectra not installed, cannot test error handling")
-
-        # Mock the HAS_PYBISPECTRA flag
-        import pte_ecg.feature_extractors.waveshape as ws_module
-
-        monkeypatch.setattr(ws_module, "HAS_PYBISPECTRA", False)
-
-        extractor = WaveShapeExtractor(parent=FeatureExtractor(sfreq=100, settings=Settings()))
-        ecg_data = np.random.randn(1, 2, 500)
-
-        with pytest.raises(ImportError, match="pybispectra is required"):
-            extractor.get_features(ecg_data)
-
-
 class TestExtractorRegistry:
     """Tests for extractor discovery and registry."""
 
@@ -309,8 +274,6 @@ class TestExtractorRegistry:
         # Optional extractors
         if HAS_NONLINEAR:
             assert "nonlinear" in registry.list_extractors()
-        if HAS_WAVESHAPE:
-            assert "waveshape" in registry.list_extractors()
 
     def test_extractor_instantiation(self):
         """Test that extractors can be instantiated from registry."""
